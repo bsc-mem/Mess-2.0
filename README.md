@@ -27,6 +27,7 @@ Visit our website: <a href="https://mess.bsc.es" target="_blank"><strong>mess.bs
   - [Command Line Options](#command-line-options)
   - [Examples](#examples)
 - [Mess Profiler](#mess-profiler)
+- [Plotting Utilities](#plotting-utilities)
 - [Changelog](#changelog)
 - [Contributors](#contributors)
 - [References](#references)
@@ -239,20 +240,82 @@ Caution: This is meant for more fine-tuning of the benchmark; make sure you are 
 
 ## Mess Profiler
 
-Mess can be used to profile apps. This profiler is a "wrapper" on top of perf, likwid, intel pcm, Intel VTune, etc., to help you profile applications using Mess's counters.
+Mess Profiler is a unified memory bandwidth profiling tool. It automatically detects your system and selects the appropriate measurement backend (`perf`, `likwid`, or Intel PCM), parses the output, and converts it to a consistent format. This means you get the same output columns regardless of the underlying tool used. It also automatically inherits CPU/memory bindings from `numactl` or `taskset`.
 
 ### Usage
 
 ```bash
-./build/bin/mess-profiler [options] <command>
+./build/bin/mess-profiler [options] [--] <command> [args...]
 ```
 
-### Options
+### Measurement Options
 
-- `-s <time>`: Sampling interval (e.g., `1s`, `100ms`). If not set, prints summary.
-- `-f <file>`: Output file. Default is stdout.
-- `--dry`: Dry run: print detected counters and command, then exit.
-- `-h, --help`: Show help.
+| Option                  | Description                                                    |
+| ----------------------- | -------------------------------------------------------------- |
+| `-s, --interval <time>` | Sampling interval (e.g., `100ms`, `1s`). Default: summary mode |
+| `-o, --output <file>`   | Output file. Default: stdout                                   |
+
+### Targeting Options
+
+| Option               | Description                                             |
+| -------------------- | ------------------------------------------------------- |
+| `-a, --system-wide`  | System-wide profiling (all CPUs/sockets)                |
+| `-p, --pid <pid>`    | Profile existing process by PID                         |
+| `-C, --cpu <list>`   | Profile only specified CPUs (e.g., `0-7,16-23`)         |
+| `-N, --nodes <list>` | Monitor memory traffic to specified NUMA nodes          |
+| `--no-inherit`       | Don't inherit binding from parent (`numactl`/`taskset`) |
+
+### Output Options
+
+| Option             | Description                              |
+| ------------------ | ---------------------------------------- |
+| `-v, --verbose`    | Verbose output (show counter details)    |
+| `--csv`            | CSV output (default)                     |
+| `--human`          | Human-readable output                    |
+| `--dry, --dry-run` | Dry run: show detected counters and exit |
+
+### Examples
+
+```bash
+# Basic profiling with 100ms sampling
+./build/bin/mess-profiler -s 100ms ./my_app
+
+# Save output to file
+./build/bin/mess-profiler -s 50ms -o bandwidth.csv ./my_app
+
+# System-wide profiling
+./build/bin/mess-profiler -a -s 1s sleep 10
+
+# Works with numactl - automatically detects binding
+numactl -m 0 -C 0-7 ./build/bin/mess-profiler -s 100ms ./my_app
+
+# Explicit CPU and memory node targeting
+./build/bin/mess-profiler -C 0-7 -N 0 -s 100ms ./my_app
+
+# Check what counters will be used
+./build/bin/mess-profiler --dry-run
+```
+
+### Output Format
+
+The profiler outputs CSV with the following columns:
+
+- `Timestamp(s)`: Time since start
+- `Bandwidth(GB/s)`: Measured memory bandwidth
+- `ReadBytes`: Bytes read from memory
+- `WriteBytes`: Bytes written to memory
+
+Use `--dry-run` to see exactly what counters and configuration will be used on your system.
+
+## Plotting Utilities
+
+The `utils/` directory contains Python scripts for visualizing Mess benchmark results. See [utils/README.md](utils/README.md) for detailed documentation.
+
+Key utilities include:
+
+- `plotter.py`: Generate bandwidth-latency curve visualizations from measurement data
+- `app_plotter.py`: Overlay application profiler data on memory curves
+- `parse_runtimes.py`: Summarize benchmark execution times
 
 ## Changelog
 

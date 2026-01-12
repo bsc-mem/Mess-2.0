@@ -167,13 +167,16 @@ def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blue
     fig, ax = plt.subplots(1, 1)
     
     try:
-        binding = config.get("MEMORY_BINDING", "local").strip().lower()
-        
-        if binding == "remote":
-            nvlink_bw = float(config.get("NVLINK_BW_GB_S", 0))
-            if nvlink_bw > 0:
-                max_bw = nvlink_bw
-            else:
+        nvlink_bw_str = config.get("NVLINK_BW_GB_S", None)
+        nvlink_bw = float(nvlink_bw_str) if nvlink_bw_str is not None else None
+
+        if nvlink_bw is not None and nvlink_bw == 0:
+            max_bw = 0
+        elif nvlink_bw is not None and nvlink_bw > 0:
+            max_bw = nvlink_bw
+        else:
+            binding = config.get("MEMORY_BINDING", "local").strip().lower()
+            if binding == "remote":
                 upi_freq = float(config.get("UPI_FREQ", 16))
                 n_lanes = float(config.get("N_DATA_LANES", 20))
                 flit_bit = float(config.get("FLIT_BIT", 80))
@@ -184,20 +187,20 @@ def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blue
                     max_bw = 2.0 * (upi_freq * n_lanes * (data_flit_bit / flit_bit) * n_upi_channels) / 8.0
                 else:
                     max_bw = 0
-        else:
-            freq_str = config.get("MEM_FREQ", "")
-            if freq_str and "Could not detect" not in freq_str:
-                freq = float(freq_str.split()[0])
             else:
-                freq = 0
+                freq_str = config.get("MEM_FREQ", "")
+                if freq_str and "Could not detect" not in freq_str:
+                    freq = float(freq_str.split()[0])
+                else:
+                    freq = 0
+                    
+                channels = float(config.get("N_CHANNELS", 2))
+                bus_width = float(config.get("BUS_WIDTH", 64)) 
                 
-            channels = float(config.get("N_CHANNELS", 2))
-            bus_width = float(config.get("BUS_WIDTH", 64)) 
-            
-            if bus_width > 0 and freq > 0:
-                 max_bw = (bus_width / 8) * freq * channels / 1000.0
-            else:
-                 max_bw = 0
+                if bus_width > 0 and freq > 0:
+                     max_bw = (bus_width / 8) * freq * channels / 1000.0
+                else:
+                     max_bw = 0
     except (ValueError, AttributeError):
         max_bw = 0
     
@@ -227,7 +230,7 @@ def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blue
     limit_bw = limit_bw_override
     if limit_bw is None:
         if max_bw > 0:
-            limit_bw = max_bw * 1.1
+            limit_bw = max_bw
             if global_max_bw > limit_bw:
                  limit_bw = global_max_bw * 1.1
         else:
@@ -262,7 +265,13 @@ def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blue
         print(f"Warning: Ratios {ratios} not plotted: {reason}")
 
     
-    if max_bw > 0:
+    is_nvidia_pmu = config.get("USE_NVIDIA_PMU", "False").lower() in ('true', '1', 't')
+    nvlink_bw = float(config.get("NVLINK_BW_GB_S", 0))
+    
+    # Do not draw the line for NVIDIA counters if NVLINK_BW is not specified
+    should_draw_max_bw_line = not (is_nvidia_pmu and nvlink_bw == 0)
+
+    if max_bw > 0 and should_draw_max_bw_line:
         ax.axvline(x=max_bw, color='red', linewidth=2, linestyle=':')
         ax.text(x=max_bw, y=ax.get_ylim()[1] * 0.95, 
                s=f'Max. theoretical BW = {max_bw} GB/s', 
@@ -300,12 +309,16 @@ def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_o
     global_max_lat = 0.0
     try:
         for _, dfs_rw, cfg, _, _ in datasets:
-            binding = cfg.get("MEMORY_BINDING", "local").strip().lower()
-            if binding == "remote":
-                nvlink_bw = float(cfg.get("NVLINK_BW_GB_S", 0))
-                if nvlink_bw > 0:
-                    max_bw = max(max_bw, nvlink_bw)
-                else:
+            nvlink_bw_str = cfg.get("NVLINK_BW_GB_S", None)
+            nvlink_bw = float(nvlink_bw_str) if nvlink_bw_str is not None else None
+
+            if nvlink_bw is not None and nvlink_bw == 0:
+                pass
+            elif nvlink_bw is not None and nvlink_bw > 0:
+                max_bw = max(max_bw, nvlink_bw)
+            else:
+                binding = cfg.get("MEMORY_BINDING", "local").strip().lower()
+                if binding == "remote":
                     upi_freq = float(cfg.get("UPI_FREQ", 16))
                     n_lanes = float(cfg.get("N_DATA_LANES", 20))
                     flit_bit = float(cfg.get("FLIT_BIT", 80))
@@ -313,16 +326,17 @@ def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_o
                     n_upi_channels = float(cfg.get("N_UPI_CHANNELS", 4))
                     if data_flit_bit > 0 and flit_bit > 0:
                         max_bw = max(max_bw, 2.0 * (upi_freq * n_lanes * (data_flit_bit / flit_bit) * n_upi_channels) / 8.0)
-            else:
-                freq_str = cfg.get("MEM_FREQ", "")
-                if freq_str and "Could not detect" not in freq_str:
-                    freq = float(freq_str.split()[0])
                 else:
-                    freq = 0
-                channels = float(cfg.get("N_CHANNELS", 2))
-                bus_width = float(cfg.get("BUS_WIDTH", 64))
-                if bus_width > 0 and freq > 0:
-                    max_bw = max(max_bw, (bus_width / 8) * freq * channels / 1000.0)
+                    freq_str = cfg.get("MEM_FREQ", "")
+                    if freq_str and "Could not detect" not in freq_str:
+                        freq = float(freq_str.split()[0])
+                    else:
+                        freq = 0
+                    channels = float(cfg.get("N_CHANNELS", 2))
+                    bus_width = float(cfg.get("BUS_WIDTH", 64))
+                    if bus_width > 0 and freq > 0:
+                        max_bw = max(max_bw, (bus_width / 8) * freq * channels / 1000.0)
+
             for _, df in dfs_rw.items():
                 if not df.empty:
                     if 'bandwidth_smooth' in df.columns and not df['bandwidth_smooth'].empty:
@@ -354,7 +368,7 @@ def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_o
     limit_bw = limit_bw_override
     if limit_bw is None:
         if max_bw > 0:
-            limit_bw = max_bw * 1.1
+            limit_bw = max_bw
             if global_max_bw > limit_bw:
                  limit_bw = global_max_bw * 1.1
         else:
@@ -430,7 +444,13 @@ def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_o
             ratio_values = [int(r) for r in ratios]
             print(f"Warning: {label} - Ratios {ratio_values} not plotted: {reason}")
                 
-    if max_bw > 0:
+    # Check configs from all datasets for NVIDIA PMU and NVLINK BW
+    is_any_nvidia_pmu = any(cfg.get("USE_NVIDIA_PMU", "False").lower() in ('true', '1', 't') for _, _, cfg, _, _ in datasets)
+    any_nvlink_bw = any(float(cfg.get("NVLINK_BW_GB_S", 0)) > 0 for _, _, cfg, _, _ in datasets)
+
+    should_draw_max_bw_line = not (is_any_nvidia_pmu and not any_nvlink_bw)
+
+    if max_bw > 0 and should_draw_max_bw_line:
         ax.axvline(x=max_bw, color=calculate_color(75), linewidth=2, linestyle=':')
         ax.text(x=max_bw, y=limit_lat * 0.9, 
                s=f'Max. theoretical BW = {int(max_bw)} GB/s', 

@@ -149,6 +149,9 @@ MESS_PROFILER_OBJS = src/system_detection.o \
                      src/measurement/bw_measurers/PcmBandwidthMeasurer.o \
                      src/measurement/measurement_storage.o \
                      src/process/traffic_gen_process_manager.o \
+                     src/profiler/process_binding.o \
+                     src/profiler/profiler_config.o \
+                     src/profiler/perf_event_profiler.o \
                      src/utils.o
 
 $(BIN_DIR)/mess-profiler: mess_profiler.cpp $(MESS_PROFILER_OBJS) $(ARCH_OBJS) $(LIBS) | $(BIN_DIR)

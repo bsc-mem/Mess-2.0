@@ -153,7 +153,7 @@ def main():
 
 
     args = parser.parse_args()
-    directories = args.directories
+    directories = [os.path.abspath(d) for d in args.directories]
     mode = args.mode
     step = args.step
     # Define a list of colormaps to cycle through
@@ -172,30 +172,9 @@ def main():
     if not datasets:
         return
 
-    shared_max_theoretical_bw = 0.0
     shared_global_max_bw = 0.0
     shared_global_max_lat = 0.0
     for _, dfs_rw, cfg, _, _ in datasets:
-        binding = cfg.get("MEMORY_BINDING", "local").strip().lower()
-        if binding == "remote":
-            upi_freq = float(cfg.get("UPI_FREQ", 16))
-            n_lanes = float(cfg.get("N_DATA_LANES", 20))
-            flit_bit = float(cfg.get("FLIT_BIT", 80))
-            data_flit_bit = float(cfg.get("DATA_FLIT_BIT", 64))
-            n_upi_channels = float(cfg.get("N_UPI_CHANNELS", 4))
-            if data_flit_bit > 0 and flit_bit > 0:
-                shared_max_theoretical_bw = max(shared_max_theoretical_bw, 2.0 * (upi_freq * n_lanes * (data_flit_bit / flit_bit) * n_upi_channels) / 8.0)
-        else:
-            freq_str = cfg.get("MEM_FREQ", "")
-            if freq_str and "Could not detect" not in freq_str:
-                freq = float(freq_str.split()[0])
-            else:
-                freq = 0
-            channels = float(cfg.get("N_CHANNELS", 2))
-            bus_width = float(cfg.get("BUS_WIDTH", 64))
-            if bus_width > 0 and freq > 0:
-                shared_max_theoretical_bw = max(shared_max_theoretical_bw, (bus_width / 8) * freq * channels / 1000.0)
-
         for _, df in dfs_rw.items():
             if not df.empty:
                 if 'bandwidth_smooth' in df.columns and not df['bandwidth_smooth'].empty:
@@ -203,25 +182,15 @@ def main():
                 if 'latency_smooth' in df.columns and not df['latency_smooth'].empty:
                     shared_global_max_lat = max(shared_global_max_lat, df['latency_smooth'].max())
 
-    shared_limit_bw = None
-    if shared_max_theoretical_bw > 0:
-        shared_limit_bw = shared_max_theoretical_bw * 1.1
-        if shared_global_max_bw > shared_limit_bw:
-            shared_limit_bw = shared_global_max_bw * 1.1
-    else:
-        shared_limit_bw = shared_global_max_bw * 1.1 if shared_global_max_bw > 0 else 321
-
-    shared_limit_lat = max(700, shared_global_max_lat * 1.1) if shared_global_max_lat > 0 else 700
-
     for _, dfs_rw, config, cmap_name, measuring_dir in datasets:
         output_path = os.path.join(measuring_dir, 'processed', 'memory_curves.pdf')
-        plot_curves(config, dfs_rw, output_path, cmap_name, shared_limit_bw, shared_limit_lat)
+        plot_curves(config, dfs_rw, output_path, cmap_name)
 
     if len(datasets) > 1:
         print("\nGenerating combined plot...")
         first_dir = directories[0]
         output_path = os.path.join(first_dir, 'processed', 'combined_memory_curves.pdf')
-        plot_combined_curves(datasets, output_path, shared_limit_bw, shared_limit_lat)
+        plot_combined_curves(datasets, output_path)
     
 
     print("\n\n==========================================\nAll plots generated successfully!\n==========================================\n")
