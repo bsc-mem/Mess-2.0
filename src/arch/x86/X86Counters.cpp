@@ -32,7 +32,6 @@
  */
 
 #include "arch/x86/X86Counters.h"
-#include "arch/x86/X86Counters.h"
 #include <cstdlib>
 #include <iostream>
 

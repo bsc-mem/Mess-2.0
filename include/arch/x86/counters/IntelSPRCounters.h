@@ -34,9 +34,9 @@
 #ifndef INTEL_SPR_COUNTERS_H
 #define INTEL_SPR_COUNTERS_H
 
-#include "architecture/PerformanceCounterStrategy.h"
+#include "architecture/BandwidthCounterStrategy.h"
 
-class IntelSPRCounters : public PerformanceCounterStrategy {
+class IntelSPRCounters : public BandwidthCounterStrategy {
 public:
     CasCounterSelection detectCasCounters() override;
     void getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) override;

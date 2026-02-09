@@ -34,7 +34,7 @@
 #include "ptrchase_perf_helper.h"
 #include "architecture/ArchitectureRegistry.h"
 #include "architecture/Architecture.h"
-#include "architecture/PerformanceCounterStrategy.h"
+#include "architecture/BandwidthCounterStrategy.h"
 
 #include <cstring>
 #include <string>
@@ -62,11 +62,16 @@ void select_tlb_events_for_ptrchase(const system_info& info,
                                     uint64_t& tlb2_raw,
                                     bool& use_tlb1,
                                     bool& use_tlb2) {
-    // Default to no TLB counters
     tlb1_raw = 0;
     tlb2_raw = 0;
     use_tlb1 = false;
     use_tlb2 = false;
+
+    auto& strategy = BandwidthCounterStrategy::instance();
+    if (strategy.is_initialized()) {
+        strategy.get_tlb_counters(tlb1_raw, tlb2_raw, use_tlb1, use_tlb2);
+        return;
+    }
 
     CPUCapabilities caps;
     
@@ -80,10 +85,9 @@ void select_tlb_events_for_ptrchase(const system_info& info,
     } else if (arch_str.find("riscv") != std::string::npos) {
         caps.arch = CPUArchitecture::RISCV64;
     } else {
-        return; // Unknown architecture
+        return;
     }
     
-    // Map vendor string
     std::string vendor_str(info.cpu_vendor);
     if (vendor_str.find("Intel") != std::string::npos || vendor_str.find("GenuineIntel") != std::string::npos) {
         caps.vendor = CPUVendor::INTEL;
@@ -97,12 +101,11 @@ void select_tlb_events_for_ptrchase(const system_info& info,
     
     caps.model_name = std::string(info.cpu_model);
     
-    // Get architecture and create counter strategy
     auto arch = ArchitectureRegistry::instance().getArchitecture(caps);
     if (arch) {
-        auto strategy = arch->createCounterStrategy(caps);
-        if (strategy) {
-            strategy->getTlbMissCounters(tlb1_raw, tlb2_raw, use_tlb1, use_tlb2);
+        auto counter_strategy = arch->createCounterStrategy(caps);
+        if (counter_strategy) {
+            counter_strategy->get_tlb_counters(tlb1_raw, tlb2_raw, use_tlb1, use_tlb2);
         }
     }
 }

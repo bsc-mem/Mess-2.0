@@ -99,4 +99,31 @@ std::string RiscvAssembler::generatePointerChaseBurstLoop() const {
 )";
 }
 
+std::string RiscvAssembler::generateNopFile() const {
+    return R"(#include <stdlib.h>
+#include <stdio.h>
+
+extern "C" void volatile nop_(void) {
+    asm __volatile__ (
+        "bne x22, x0, start_pause;\n"
+        "j end;\n"
+        "start_pause:"
+        "mv x23, x22;\n"
+        "start_loop:\n"
+        "nop;\n"
+        "addi x23, x23, -1;\n"
+        "bne x23, x0, start_loop;\n"
+        "end:"
+        :
+        :
+        : "x30", "x4", "x10", "x23"
+    );
+}
+
+int nop(int *ntimes) {
+    return 0;
+}
+)";
+}
+
 

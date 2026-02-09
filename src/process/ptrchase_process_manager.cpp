@@ -184,8 +184,28 @@ bool PtrChaseProcessManager::launch_process() {
         ptr_chase_bin = "./ptr_chase";
     }
     
-    std::string ptr_chase_cmd = cmd_prefix + "numactl -C 0 --membind=" + mem_node_str +
-                                " " + ptr_chase_bin + " >> " + log_path + " 2>&1 & echo $!";
+    const auto& cache = SystemToolsCache::instance();
+    bool have_taskset = cache.have_taskset;
+    bool have_numactl = cache.have_numactl;
+    
+    std::string binding_cmd;
+    if (have_numactl && have_taskset) {
+        binding_cmd = "numactl --membind=" + mem_node_str + " taskset -c 0 " + ptr_chase_bin;
+    } else if (have_numactl) {
+        binding_cmd = "numactl --membind=" + mem_node_str + " --physcpubind=0 " + ptr_chase_bin;
+    } else if (have_taskset) {
+        binding_cmd = "taskset -c 0 " + ptr_chase_bin;
+        if (config_.verbosity >= 2) {
+            std::cerr << "  [NOTICE] numactl not found, using taskset only (no memory binding)" << std::endl;
+        }
+    } else {
+        binding_cmd = ptr_chase_bin;
+        if (config_.verbosity >= 1) {
+            std::cerr << "  [WARNING] Neither numactl nor taskset found. ptr_chase will run without CPU/memory binding." << std::endl;
+        }
+    }
+    
+    std::string ptr_chase_cmd = "{ " + cmd_prefix + binding_cmd + " >> " + log_path + " 2>&1 & echo $!; } 2>/dev/null";
 
     FILE* ptr_pipe = popen(ptr_chase_cmd.c_str(), "r");
     if (!ptr_pipe) {
@@ -357,9 +377,6 @@ void PtrChaseProcessManager::cleanup() {
 
     std::remove(ready_flag_path_.c_str());
     std::remove(pipe_path_.c_str());
-
-    system("pkill -9 -f 'perf.*ptr_chase' 2>/dev/null");
-    system("pkill -9 ptr_chase 2>/dev/null");
 }
 
 
@@ -441,4 +458,3 @@ bool PtrChaseProcessManager::wait_for_done(int timeout_ms) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
-

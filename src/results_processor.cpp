@@ -164,7 +164,6 @@ void ResultsProcessor::print_timing_statistics() const {
         }
     }
     
-    // Separate results by mode
     std::vector<BenchmarkResult> seq_results;
     
     for (const auto& result : results_) {

@@ -1,67 +1,118 @@
 <div align="center">
-<img src="doc/logos/512_mess_white.png" alt="Mess Benchmark Logo" width="200">
-</div>
-
-<div align="center">
-<h1>Mess Benchmark</h1>
-<p>A Multiplatform benchmark designed to provide holistic, detailed and close-to-hardware view of memory system performance with family of bandwidth-latency curves. This is an update to the original <a href="https://github.com/bsc-mem/Mess-benchmark" target="_blank">Mess Benchmark</a> (<span style="color:#b34700;font-style:italic;">Now deprecated</span>) to allow for ease of use for the user. 
-<br>
-</p><p>
-Visit our website: <a href="https://mess.bsc.es" target="_blank"><strong>mess.bsc.es</strong></a>
-</p>
-</div>
-
-<div align="center">
-<img src="https://img.shields.io/badge/License-BSD%203--Clause-blue.svg" alt="License"> <img src="https://img.shields.io/badge/Version-2.0.0-blue" alt="Version"> <img src="https://img.shields.io/badge/Contributors-6-blue" alt="Contributors">
+  <img src="doc/logos/512_mess_white.png" alt="Mess Benchmark Logo" width="180">
+  <h1>Mess Benchmark 2.0</h1>
+  <p><strong>A multiplatform benchmark designed to provide a holistic, detailed, and close-to-hardware view of memory system performance through bandwidth-latency curves.</strong></p>
+  <p>
+    This is an update to the original
+    <a href="https://github.com/bsc-mem/Mess-benchmark">Mess Benchmark</a>
+    (<em>now deprecated</em>), focused on improved usability and portability.
+  </p>
+  <p>
+    <a href="https://mess.bsc.es">Website</a> &nbsp;|&nbsp;
+    <a href="https://github.com/bsc-mem/Mess-2.0">GitHub</a> &nbsp;|&nbsp;
+    <a href="https://arxiv.org/pdf/2405.10170">Paper</a>
+  </p>
+  <p>
+    <img src="https://img.shields.io/badge/License-BSD%203--Clause-blue.svg" alt="License">
+    <img src="https://img.shields.io/badge/Version-2.0.2-blue" alt="Version">
+  </p>
 </div>
 
 ## Table of Contents
 
+- [Documentation](#documentation)
+- [Motivation](#motivation)
+- [Tools Included](#tools-included)
 - [Architecture Support](#architecture-support)
 - [Installation](#installation)
-  - [Cloning the repo](#cloning-the-repo)
+  - [Clone](#clone)
   - [Dependencies](#dependencies)
-  - [Compilation](#compilation)
-- [Executing](#executing)
-  - [Quick start](#quick-start)
-  - [Command Line Options](#command-line-options)
-  - [Examples](#examples)
+  - [Build](#build)
+  - [Verification](#verification)
+- [Quick Start](#quick-start)
+- [Common Workflows](#common-workflows)
 - [Mess Profiler](#mess-profiler)
-- [Plotting Utilities](#plotting-utilities)
-- [Changelog](#changelog)
+- [Plotter-Parser](#plotter-parser)
+- [Learning Resources](#learning-resources)
+- [Troubleshooting](#troubleshooting)
 - [Contributors](#contributors)
+- [Citation](#citation)
 - [References](#references)
+
+---
+
+## Documentation
+
+Project documentation is available in the GitHub wiki:
+
+- [Wiki Home](https://github.com/bsc-mem/Mess-2.0/wiki/Home)
+- [Installation](https://github.com/bsc-mem/Mess-2.0/wiki/Installation)
+- [Understanding CLI Arguments](https://github.com/bsc-mem/Mess-2.0/wiki/Understanding-CLI-Arguments)
+- [Mess Benchmark](https://github.com/bsc-mem/Mess-2.0/wiki/Mess-Benchmark)
+- [Mess Profiler](https://github.com/bsc-mem/Mess-2.0/wiki/Mess-Profiler)
+- [Plotter-Parser](https://github.com/bsc-mem/Mess-2.0/wiki/Plotter-Parser)
+- [Architecture Support](https://github.com/bsc-mem/Mess-2.0/wiki/Architecture-Support)
+- [FAQ](https://github.com/bsc-mem/Mess-2.0/wiki/FAQ)
+
+---
+
+## Motivation
+
+Traditional memory benchmarks report isolated metrics such as peak bandwidth or idle latency, which often fail to capture how memory systems behave under realistic workloads. **Mess** (Memory Stress) addresses this limitation by characterizing memory performance through **bandwidth-latency curves** that cover the full range of memory traffic intensity, from unloaded to fully saturated.
+
+This approach reveals critical insights:
+
+- Memory writes degrade performance significantly compared to reads
+- Systems typically saturate at 70-90% of theoretical maximum bandwidth
+- Latency ranges from 85-130ns when idle to 200-600ns+ under saturation
+
+Mess provides a holistic, close-to-hardware view of memory system behavior, enabling researchers and engineers to understand real-world performance characteristics that standard benchmarks miss.
+
+> **MICRO 2024 Best Paper Runner-Up**: The Mess methodology was published at the 57th IEEE/ACM International Symposium on Microarchitecture.
+
+For a detailed explanation of the benchmark methodology, see the [Memory BSC Tools page](https://memory.bsc.es/tools/mess-benchmark).
+
+---
+
+## Tools Included
+
+Mess 2.0 provides an integrated workflow for memory system characterization, from benchmarking to application profiling:
+
+- **[Mess Benchmark](https://github.com/bsc-mem/Mess-2.0/wiki/Mess-Benchmark)**: Characterizes your memory system by generating bandwidth-latency curves that reveal how it behaves under varying load.
+- **[Mess Profiler](https://github.com/bsc-mem/Mess-2.0/wiki/Mess-Profiler)**: Automates counter discovery and runs profiling tools (`perf`, `likwid`, etc.) with the correct configuration, ensuring application measurements align with benchmark data.
+- **[Plotter-Parser](https://github.com/bsc-mem/Mess-2.0/wiki/Plotter-Parser)**: Generates publication-quality plots as well as CSV and JSON files containing the parsed bandwidth-latency curves.
+- **[Traffic Generator](https://github.com/bsc-mem/Mess-2.0/wiki/Traffic-Generator)**: The low-level engine that generates precise memory traffic patterns at the assembly level. Can also be used independently for custom microbenchmarks.
+
+---
 
 ## Architecture Support
 
-We consider an architecture to be supported when Mess can automatically run on it with the current code. We are working on porting the original <a href="https://github.com/bsc-mem/Mess-benchmark" target="_blank">Mess Benchmark</a> code to all the architectures it supports.
+Support status follows the wiki ([Architecture-Support](https://github.com/bsc-mem/Mess-2.0/wiki/Architecture-Support)):
 
-| Architecture | Mess2.0      |
-| ------------ | ------------ |
-| x86 CPUs     | ✅ Supported |
-| ARM CPUs     | ✅ Supported |
-| Power CPUs   | ✅ Supported |
-| RISC-V CPUs  | ✅ Supported |
-| NVIDIA GPUs  | 🚧 Pending   |
+| Architecture | Status | SIMD | Notes |
+| --- | --- | --- | --- |
+| x86-64 CPUs | Supported | AVX2, AVX-512 | Intel and AMD processors |
+| ARM CPUs | Supported | NEON, SVE | Includes Neoverse, Graviton, Apple Silicon |
+| Power CPUs | Supported | VSX | Power8 and newer |
+| RISC-V CPUs | WIP | RVV 1.0 | Assembly + latency + counter detection available; bandwidth measurement pending |
+| GPUs | Pending | — | Under active development |
 
-GPUs are the only paradigm still under active development for Mess2.0.
-
-**Disclaimer:** Currently pending architectures here are architectures supported by the original [Mess Benchmark](https://github.com/bsc-mem/Mess-benchmark) that we are adapting to Mess2.0.
+---
 
 ## Installation
 
-### Cloning the repo
+See full instructions in the [Installation wiki page](https://github.com/bsc-mem/Mess-2.0/wiki/Installation).
 
-Clone the repository with all submodules:
+### Clone
 
 ```bash
-git clone --recursive https://github.com/bsc-mem/Mess-2.0
-cd mess2.0
+git clone --recursive https://github.com/bsc-mem/Mess-2.0.git
+cd Mess-2.0
 ```
 
-We need the recursive tag to ensure we download some additional dependencies required for the benchmark.
+**Important**: The `--recursive` flag is required to download submodules that Mess depends on.
 
-If you forget `--recursive`, you can initialize submodules later:
+If you forget `--recursive`, initialize submodules later:
 
 ```bash
 git submodule update --init --recursive
@@ -69,281 +120,215 @@ git submodule update --init --recursive
 
 ### Dependencies
 
-The following dependencies are required to run the benchmark:
+Core requirements:
 
-| Dependency | Purpose                                                             | Installation                                                                                                           |
-| ---------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `perf`     | Hardware performance counters for bandwidth and latency measurement | `sudo apt install linux-tools-common linux-tools-$(uname -r)` (Debian/Ubuntu) or `sudo yum install perf` (RHEL/CentOS) |
-| `numactl`  | NUMA memory binding for multi-socket systems                        | `sudo apt install numactl` (Debian/Ubuntu) or `sudo yum install numactl` (RHEL/CentOS)                                 |
-| `GCC`      | C/C++ compiler with C++17 support                                   | `sudo apt install build-essential` (Debian/Ubuntu) or `sudo yum install gcc-c++` (RHEL/CentOS)                         |
+- **C++17 compiler**: GCC 9+ (recommended), Clang 10+, Intel OneAPI (ICX), AOCC
+- **numactl**: NUMA memory binding (required)
+- **taskset**: Core pinning (preferred, part of `util-linux`)
+- **perf**: Recommended counter backend (`linux-tools-common`)
+- **Python 3**: Plotting utilities
 
-**Optional dependencies:**
+On Linux, ensure perf access:
 
-| Dependency | Purpose                                                      | Installation                                                          |
-| ---------- | ------------------------------------------------------------ | --------------------------------------------------------------------- |
-| `likwid`   | Alternative bandwidth measurement (required for HBM systems) | See [LIKWID installation guide](https://github.com/RRZE-HPC/likwid)   |
-| `taskset`  | CPU core pinning for consistent measurements (recommended)   | Usually included with `util-linux`, already installed on most systems |
+```bash
+cat /proc/sys/kernel/perf_event_paranoid
+echo 0 | sudo tee /proc/sys/kernel/perf_event_paranoid
+```
 
-> **Note:** The benchmark requires access to hardware performance counters. On Linux, you may need to set `perf_event_paranoid` to allow access:
->
-> ```bash
-> echo 0 | sudo tee /proc/sys/kernel/perf_event_paranoid
-> ```
+Huge pages are recommended for more accurate measurements:
 
-### Compilation
+```bash
+echo 1024 | sudo tee /proc/sys/vm/nr_hugepages
+```
 
-The Mess Benchmark is designed to compile for any architecture automatically by simply running:
+> Even without huge pages, Mess automatically compensates for page walk latency. See [Huge-Memory-Pages](https://github.com/bsc-mem/Mess-2.0/wiki/Huge-Memory-Pages) for details.
+
+### Build
 
 ```bash
 make
-```
-
-Once compiled, you need to run:
-
-```bash
 make install
 ```
 
-for it to generate the corresponding binaries for the current architecture. The binaries will be placed in the `build/bin` folder.
+Binaries are generated in `build/bin/`:
 
-To use them easily, you can add this folder to your PATH:
+- `mess` — Core benchmark
+- `mess-profiler` — Memory bandwidth profiler
+- `traffic_generator` — Standalone traffic generation tool
+
+Optional PATH setup:
 
 ```bash
 export PATH=$PATH:$(pwd)/build/bin
 ```
 
-Or add it permanently to your shell configuration file (e.g., `~/.bashrc` or `~/.zshrc`).
-
-**If there is an issue when compiling**, please let the maintainers know through emails (see [Contributors](#contributors)) or through an issue in the repository!
-
-## Executing
-
-### Quick start
-
-The benchmark has two modes: Plain and Profile.
-
-**Plain mode** (default): Run the full benchmark and display a performance summary.
+### Verification
 
 ```bash
-./build/bin/mess
+./build/bin/mess --version
+./build/bin/mess --dry-run --verbose=2
 ```
 
-**Profile mode**: Generate profiling files for plotting curves.
+---
+
+## Quick Start
 
 ```bash
+./build/bin/mess --dry-run --verbose=2
+
+./build/bin/mess
+
 ./build/bin/mess --profile
 ```
 
-These are the default behaviors, but you can customize further through the flags in the next section.
+Common options:
 
-### Command Line Options
+| Option | Description | Example |
+| --- | --- | --- |
+| `--ratio=N[,N...]` | Issued load ratio(s) in % | `--ratio=100,75,50` |
+| `--pause=N[,N...]` | Pause bubble values | `--pause=0,10,100,1000` |
+| `--profile` | Save measurement files | `--profile` |
+| `--verbose=N` | Verbosity level `0-4` | `--verbose=3` |
+| `--measurer=TYPE` | Counter backend (`auto/perf/likwid/pcm`) | `--measurer=perf` |
+| `--bind=LIST` | NUMA memory-node binding | `--bind=0` |
+| `--cores=LIST` | Explicit traffic-generator cores | `--cores=0-15` |
+| `--total-cores=N` | Number of traffic-generator cores | `--total-cores=16` |
 
-The Mess Benchmark has been designed to be easy to use for any user. As mentioned before, it can be run without any flags and it will execute correctly.
+For the complete option set, use `./build/bin/mess --help` or see [Understanding-CLI-Arguments](https://github.com/bsc-mem/Mess-2.0/wiki/Understanding-CLI-Arguments).
 
-If you'd like to customize some aspects of its run, you can use the following flags:
+---
 
-- `--ratio=N` or `-r N`: Set memory-to-computation ratio (default: ALL)
-  - Specifies the read/write ratio as a percentage (0-100)
-  - Example: `--ratio=75` for 75% reads, 25% writes
-  - **Optional** - uses default (0-100% in 2% steps) if not specified
-- `--profile`: Enable profiling output
-  - Saves bandwidth and latency measurements to files
-  - This flag is needed to ensure the output files are created to plot the curves from.
-  - Creates `measuring/` directory with results
-  - **Optional** - disabled by default
-- `--folder=DIR`: Set root output folder (default: measuring)
-  - Specifies the directory where output files are saved
-  - **Optional** - uses default if not specified
-- `--verbose=N` or `-v N`: Set verbosity level (0-3)
-  - 1: Basic progress information (default)
-    - Shows progress bar
-    - ETA and final run summary
-  - 2: Detailed execution information
-    - Flags used
-    - Steps the benchmark follows, and some information about its execution
-  - 3: Debug information
-    - Stabilization data with raw measurement values
-    - Detailed commands being instanced from within C++
-  - **Optional** - uses default if not specified
-- `--dry-run`: Detect system and print configuration without running benchmark
-  - Shows system information and benchmark settings
-  - Useful for checking configuration before actual execution
-  - **Optional** - runs benchmark normally if not specified
-- `--help` or `-h`: Show usage information and exit
-- `--version` or `-V`: Show version information and exit
+## Common Workflows
 
-#### Advanced Options
-
-Caution: This is meant for more fine-tuning of the benchmark; make sure you are familiar with its code.
-
-- `--total-cores=N`: Limit total number of cores used by TrafficGen workers
-  - Default: TOTAL_CORES-1 (core 0 is kept free)
-  - Must be <= TOTAL_CORES-1; otherwise default is used
-  - Workers are spread across the first N eligible cores
-- `--cores=LIST`: Explicit list of cores to use (e.g., `0,1,2,3`)
-  - Incompatible with `--total-cores`
-  - Useful for specific binding scenarios (e.g., avoiding hyperthreads or specific sockets)
-- `--bind=NODES`: NUMA memory binding (node number or comma-separated list)
-  - `N` (single integer): Bind memory allocations to NUMA node `N` (e.g., `--bind=1`)
-  - `N,M,...` (comma-separated list): Bind to multiple NUMA nodes (e.g., `--bind=0,1`)
-  - Affects `numactl`/`srun --mem-bind` used for TrafficGen, bandwidth sampling, and ptr_chase
-  - **Optional** - if not specified, uses default system allocation
-- `--pause=VALUES`: Specify pause values manually
-  - Comma-separated list of pause values
-  - Example: `--pause=0,10,100,1000`
-  - **Optional** - uses default curve points if not specified
-- `--repetitions=N`: Number of repetitions per measurement point (default: 3)
-  - More repetitions provide more stable results but take longer
-  - **Optional** - uses default if not specified
-- `--likwid`: Force use of LIKWID for bandwidth measurement
-  - Forces the use of `likwid-perfctr` even on standard memory systems (uses MBOX counters)
-  - Requires `likwid-perfctr` to be in PATH or `LIKWID_PERFCTR_PATH` set
-  - **Optional** - disabled by default
-- `--persistent-trafficgen`: Keep TrafficGen alive across repetitions
-  - Improves performance by reusing TrafficGen processes
-  - Reduces startup overhead for repeated measurements
-  - **Optional** - disabled by default
-- `--extra-perf=COUNTERS`: Measure additional performance counters
-  - Comma-separated list of perf events to measure alongside bandwidth (e.g., `instructions,cycles`)
-  - Useful for correlating bandwidth with other metrics
-  - **Optional** - none by default
-- Kernel code generation tuning: see `include/kernel_generator.h`
-  - You can adjust `KernelConfig` (e.g., `ratio_granularity`, `ops_per_pause_block`, `num_simd_registers`)
-  - Control ISA selection via `ISAMode` and related helpers
-  - Toggle micro-architectural toggles such as `enable_interleaving`, `use_nontemporal_stores`, `single_registers`
-  - These values will tune the generated assembly code for TrafficGen's bw saturation.
-
-### Examples
-
-> **First-time users:** If running on a machine for the first time, it's recommended to test with a single ratio and pause value with verbosity set to 3 to debug and verify the benchmark is working correctly:
->
-> ```bash
-> ./build/bin/mess --profile --ratio=100 --pause=0 --verbose=3
-> ```
+### Single-Point Sanity Check
 
 ```bash
-# Basic benchmark with default settings (full size, ratio 50)
-./build/bin/mess
-
-# Single ratio with profiling (saves to files)
-./build/bin/mess --ratio=50 --profile
-
-# Dry run to check system configuration
-./build/bin/mess --dry-run --verbose 2
-
-# Quick test with small problem size
-./build/bin/mess --ratio=25 --verbose 1
-
-# Custom pause values and repetitions (advanced options)
-./build/bin/mess --ratio=75 --pause=0,50,500,5000 --repetitions=5 --profile
+./build/bin/mess --profile --ratio=100 --pause=0 --verbose=3 --repetitions=1
+./build/bin/mess --profile --ratio=0 --pause=0 --verbose=3 --repetitions=1
 ```
+
+### NUMA Comparison
+
+```bash
+./build/bin/mess --profile --bind=0 --folder=numa0
+./build/bin/mess --profile --bind=1 --folder=numa1
+```
+
+### Core-Scaling Sweep
+
+```bash
+for c in 2 4 8 16; do
+  ./build/bin/mess --profile --total-cores=$c --folder=cores_$c
+done
+```
+
+---
 
 ## Mess Profiler
 
-Mess Profiler is a unified memory bandwidth profiling tool. It automatically detects your system and selects the appropriate measurement backend (`perf`, `likwid`, or Intel PCM), parses the output, and converts it to a consistent format. This means you get the same output columns regardless of the underlying tool used. It also automatically inherits CPU/memory bindings from `numactl` or `taskset`.
-
-### Usage
+`mess-profiler` reuses Mess counter discovery to profile applications with consistent output.
 
 ```bash
-./build/bin/mess-profiler [options] [--] <command> [args...]
-```
-
-### Measurement Options
-
-| Option                  | Description                                                    |
-| ----------------------- | -------------------------------------------------------------- |
-| `-s, --interval <time>` | Sampling interval (e.g., `100ms`, `1s`). Default: summary mode |
-| `-o, --output <file>`   | Output file. Default: stdout                                   |
-
-### Targeting Options
-
-| Option               | Description                                             |
-| -------------------- | ------------------------------------------------------- |
-| `-a, --system-wide`  | System-wide profiling (all CPUs/sockets)                |
-| `-p, --pid <pid>`    | Profile existing process by PID                         |
-| `-C, --cpu <list>`   | Profile only specified CPUs (e.g., `0-7,16-23`)         |
-| `-N, --nodes <list>` | Monitor memory traffic to specified NUMA nodes          |
-| `--no-inherit`       | Don't inherit binding from parent (`numactl`/`taskset`) |
-
-### Output Options
-
-| Option             | Description                              |
-| ------------------ | ---------------------------------------- |
-| `-v, --verbose`    | Verbose output (show counter details)    |
-| `--csv`            | CSV output (default)                     |
-| `--human`          | Human-readable output                    |
-| `--dry, --dry-run` | Dry run: show detected counters and exit |
-
-### Examples
-
-```bash
-# Basic profiling with 100ms sampling
-./build/bin/mess-profiler -s 100ms ./my_app
-
-# Save output to file
-./build/bin/mess-profiler -s 50ms -o bandwidth.csv ./my_app
-
-# System-wide profiling
-./build/bin/mess-profiler -a -s 1s sleep 10
-
-# Works with numactl - automatically detects binding
-numactl -m 0 -C 0-7 ./build/bin/mess-profiler -s 100ms ./my_app
-
-# Explicit CPU and memory node targeting
-./build/bin/mess-profiler -C 0-7 -N 0 -s 100ms ./my_app
-
-# Check what counters will be used
 ./build/bin/mess-profiler --dry-run
+
+./build/bin/mess-profiler -s 100ms -o app_profile.csv ./my_app
 ```
 
-### Output Format
+Profiler docs: [Mess-Profiler](https://github.com/bsc-mem/Mess-2.0/wiki/Mess-Profiler)
 
-The profiler outputs CSV with the following columns:
+---
 
-- `Timestamp(s)`: Time since start
-- `Bandwidth(GB/s)`: Measured memory bandwidth
-- `ReadBytes`: Bytes read from memory
-- `WriteBytes`: Bytes written to memory
+## Plotter-Parser
 
-Use `--dry-run` to see exactly what counters and configuration will be used on your system.
+Visualization utilities in `utils/`:
 
-## Plotting Utilities
+- `plotter.py`: generates memory-curve plots and processed CSV/JSON
+- `app_plotter.py`: overlays application profile points on curves
+- `parse_runtimes.py`: summarizes run times
 
-The `utils/` directory contains Python scripts for visualizing Mess benchmark results. See [utils/README.md](utils/README.md) for detailed documentation.
+```bash
+cd utils
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
 
-Key utilities include:
+Plotter docs: [Plotter-Parser](https://github.com/bsc-mem/Mess-2.0/wiki/Plotter-Parser)
 
-- `plotter.py`: Generate bandwidth-latency curve visualizations from measurement data
-- `app_plotter.py`: Overlay application profiler data on memory curves
-- `parse_runtimes.py`: Summarize benchmark execution times
+---
 
-## Changelog
+## Learning Resources
 
-See [CHANGELOG.md](CHANGELOG.md) for details on new features and fixes.
+- **Tutorials and Slides**: [mess.bsc.es/tutorials](https://mess.bsc.es/tutorials)
+- **Detailed Methodology**: [memory.bsc.es/tools/mess-benchmark](https://memory.bsc.es/tools/mess-benchmark)
+
+---
+
+## Troubleshooting
+
+- Permission errors on counters: set `perf_event_paranoid` to `0`
+- Missing counters/backend mismatch: check `./build/bin/mess-profiler --dry-run`
+- Unstable measurements: increase `--repetitions` and use `--verbose=3`
+
+More: [FAQ](https://github.com/bsc-mem/Mess-2.0/wiki/FAQ) and [Iterative-Debugging](https://github.com/bsc-mem/Mess-2.0/wiki/Iterative-Debugging)
+
+**Found a bug?** Open an issue on [GitHub](https://github.com/bsc-mem/Mess-2.0/issues) or email [mess@bsc.es](mailto:mess@bsc.es?subject=[Mess2.0]%20Bug%20Report).
+
+---
 
 ## Contributors
 
-For issues or questions, contact the maintainers:
+Mess is developed by the **[Memory Systems Team](https://memory.bsc.es)** at the Barcelona Supercomputing Center (BSC).
 
 <table>
   <tr>
-    <td align="center" width="150" style="vertical-align: top;">
+    <td align="center" width="160" style="vertical-align: top;">
       <sub><b>Victor Xirau Guardans</b><br/>Main Mess 2.0 developer<br/><a href="mailto:victor.xirau@bsc.es">victor.xirau@bsc.es</a></sub>
     </td>
-       <td align="center" width="150" style="vertical-align: top;">
+    <td align="center" width="160" style="vertical-align: top;">
       <sub><b>Mariana Carmin</b><br/>Mess 2.0 developer<br/><a href="mailto:mcarmin@bsc.es">mcarmin@bsc.es</a></sub>
     </td>
-    <td align="center" width="150" style="vertical-align: top;">
-      <sub><b>Pouya Esmaili Dokht</b><br/>Main Mess 1.0 developer<br/><a href="mailto:pouya.esmaili@bsc.es">pouya.esmaili@bsc.es</a></sub>
+    <td align="center" width="160" style="vertical-align: top;">
+      <sub><b>Pouya Esmaili Dokht</b><br/>Mess Paper author<br/><a href="mailto:pouya.esmaili@bsc.es">pouya.esmaili@bsc.es</a></sub>
     </td>
   </tr>
 </table>
 
-Or send an email to [mess@bsc.es](mailto:mess@bsc.es?subject=[Mess2.0]%20Request)
+Or email: [mess@bsc.es](mailto:mess@bsc.es?subject=[Mess2.0]%20Request)
+
+---
+
+## Citation
+
+If you use Mess in research, please cite:
+
+```bibtex
+@inproceedings{esmaili2024mess,
+  title     = {A Mess of Memory System Benchmarking, Simulation and Application Profiling},
+  author    = {Esmaili-Dokht, Pouya and Sgherzi, Francesco and Girelli, Valeria Soldera
+               and Boixaderas, Isaac and Carmin, Mariana and Monemi, Alireza
+               and Armejach, Adria and Mercadal, Estanislao and Llort, German
+               and Radojkovi{\'c}, Petar and Moreto, Miquel and Gim{\'e}nez, Judit
+               and Martorell, Xavier and Ayguad{\'e}, Eduard and Labarta, Jesus
+               and Confalonieri, Emanuele and Dubey, Rishabh and Adlard, Joshua},
+  booktitle = {Proceedings of the 57th IEEE/ACM International Symposium on Microarchitecture (MICRO)},
+  pages     = {136--152},
+  year      = {2024},
+  publisher = {IEEE}
+}
+```
+
+---
 
 ## References
 
-1. **[Mess Benchmark](https://github.com/bsc-mem/Mess-benchmark)** - The original implementation of the Mess benchmark.
-2. **[Mess Simulator](https://github.com/bsc-mem/Mess-simulator)** - Analytical memory model using bandwidth-latency curves.
-3. **[Mess-Paraver](https://github.com/bsc-mem/Mess-Paraver)** - Integration with Paraver for visualization.
-4. **[Mess Paper](https://mess.bsc.es)** - Esmaili-Dokht, P., Sgherzi, F., Girelli, V. S., Boixaderas, I., Carmin, M., Monemi, A., Armejach, A., Mercadal, E., Llort, G., Radojković, P., Moreto, M., Giménez, J., Martorell, X., Ayguadé, E., Labarta, J., Confalonieri, E., Dubey, R., & Adlard, J. (2024). A mess of memory system benchmarking, simulation and application profiling. In _Proceedings of the 57th IEEE/ACM International Symposium on Microarchitecture_ (MICRO) (pp. 136-152). IEEE.
+1. **[Mess Benchmark](https://github.com/bsc-mem/Mess-benchmark)** — The original implementation of the Mess benchmark.
+2. **[Mess Simulator](https://github.com/bsc-mem/Mess-simulator)** — Analytical memory model using bandwidth-latency curves.
+3. **[Mess-Paraver](https://github.com/bsc-mem/Mess-Paraver)** — Integration with Paraver for visualization.
+4. **[Mess Paper](https://mess.bsc.es)** — Esmaili-Dokht, P., Sgherzi, F., Girelli, V. S., Boixaderas, I., Carmin, M., Monemi, A., Armejach, A., Mercadal, E., Llort, G., Radojković, P., Moreto, M., Giménez, J., Martorell, X., Ayguadé, E., Labarta, J., Confalonieri, E., Dubey, R., & Adlard, J. (2024). A mess of memory system benchmarking, simulation and application profiling. In _Proceedings of the 57th IEEE/ACM International Symposium on Microarchitecture_ (MICRO) (pp. 136-152). IEEE.
+
+---
+
+<p align="center">
+  <sub>Mess Benchmark is released under the BSD 3-Clause License</sub>
+</p>

@@ -38,6 +38,7 @@
 #include <string.h>
 #include <sys/time.h>
 #include <sys/mman.h>
+#include <fcntl.h>
 #include "utils.h"
 
 #ifndef MAP_HUGE_SHIFT
@@ -60,13 +61,24 @@ static TrafficGen_TYPE* a;
 static TrafficGen_TYPE* b;
 static ssize_t array_elements;
 
+static void release_array(TrafficGen_TYPE* ptr, size_t bytes, int via_mmap) {
+    if (!ptr) return;
+    if (via_mmap) {
+        munmap(ptr, bytes);
+    } else {
+        free(ptr);
+    }
+}
+
 int main(int argc, char* argv[]) {
     int rd_percentage = 50;
     int pause = 0;
     int opt;
+    int verbose = 0;
     int workers = 1;
+    const char* fifo_path = NULL;
 
-    while ((opt = getopt(argc, argv, ":r:p:w:")) != -1) {
+    while ((opt = getopt(argc, argv, ":r:p:w:v:f:")) != -1) {
         switch (opt) {
             case 'r':
                 rd_percentage = atoi(optarg);
@@ -89,6 +101,12 @@ int main(int argc, char* argv[]) {
                 if (workers <= 0) {
                     return 1;
                 }
+                break;
+            case 'v':
+                verbose = atoi(optarg);
+                break;
+            case 'f':
+                fifo_path = optarg;
                 break;
             default:
                 return 1;
@@ -117,6 +135,8 @@ int main(int argc, char* argv[]) {
     if (array_elements == 0) array_elements = alignment;
 
     size_t array_bytes = array_elements * sizeof(TrafficGen_TYPE);
+    int a_via_mmap = 0;
+    int b_via_mmap = 0;
     
 #if defined(__linux__) && defined(MAP_HUGETLB)
     #define MMAP_FLAGS (MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB)
@@ -126,40 +146,63 @@ int main(int argc, char* argv[]) {
 
     a = (TrafficGen_TYPE*)mmap(NULL, array_bytes, PROT_READ | PROT_WRITE, MMAP_FLAGS, -1, 0);
     if (a == MAP_FAILED) {
-        fprintf(stderr, "Huge page allocation failed for array A, falling back to posix_memalign\n");
+        if(verbose == 1){
+            fprintf(stderr, "Huge page allocation failed for array A, falling back to posix_memalign\n");
+        }
         if (posix_memalign((void**)&a, 64, array_bytes) != 0) return 1;
     } else {
-        fprintf(stdout, "Huge page allocation success for array A\n");
+        a_via_mmap = 1;
+        if(verbose == 1){
+            fprintf(stdout, "Huge page allocation success for array A\n");
+        }   
     }
 
     b = (TrafficGen_TYPE*)mmap(NULL, array_bytes, PROT_READ | PROT_WRITE, MMAP_FLAGS, -1, 0);
     if (b == MAP_FAILED) {
-        fprintf(stderr, "Huge page allocation failed for array B, falling back to posix_memalign\n");
-        if (posix_memalign((void**)&b, 64, array_bytes) != 0) return 1;
+        if(verbose == 1){
+            fprintf(stderr, "Huge page allocation failed for array B, falling back to posix_memalign\n");
+        }
+        if (posix_memalign((void**)&b, 64, array_bytes) != 0) {
+            release_array(a, array_bytes, a_via_mmap);
+            return 1;
+        }
     } else {
-        fprintf(stdout, "Huge page allocation success for array B\n");
+        b_via_mmap = 1;
+        if(verbose == 1){
+            fprintf(stdout, "Huge page allocation success for array B\n");
+        }
     }
+
+
 
     fprintf(stdout, "TrafficGen started: ratio=%d, pause=%d, workers=%d, elements=%zd\n", 
             rd_percentage, pause, workers, array_elements);
     fflush(stdout);
     fflush(stderr);
 
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
     for (ssize_t j = 0; j < array_elements; j++) {
         a[j] = 1.0;
         b[j] = 2.0;
     }
 
+    if (fifo_path) {
+        int fifo_fd = open(fifo_path, O_WRONLY);
+        if (fifo_fd >= 0) {
+            char ready = 'R';
+            write(fifo_fd, &ready, 1);
+        }
+    }
+
     for (;;) {
-#ifdef _OPENMP
-#pragma omp parallel
-#endif
         {
             TrafficGen_copy_rw(a, b, &array_elements, &pause, rd_percentage);
         }
     }
 
-    free(a);
-    free(b);
+    release_array(a, array_bytes, a_via_mmap);
+    release_array(b, array_bytes, b_via_mmap);
     return 0;
 }

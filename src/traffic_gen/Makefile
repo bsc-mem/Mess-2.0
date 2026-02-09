@@ -30,9 +30,9 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 CC = gcc
 MPICC = mpicc
-CFLAGS = -march=native -Wall
+CFLAGS = -march=native -Wall -fopenmp
 MPICC_FLAGS = -diag-disable=10441
-LDFLAGS = -pthread -lrt
+LDFLAGS = -pthread -lrt -fopenmp
 
 SRCDIR=src
 BUILDDIR=build

@@ -59,6 +59,8 @@ public:
     std::string getPointerChaseInstruction() const override;
     std::string generatePointerChaseBurstLoop() const override;
 
+    std::string generateNopFile() const override;
+
 };
 
 #endif

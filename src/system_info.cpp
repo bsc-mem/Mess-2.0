@@ -552,9 +552,24 @@ int system_info_detect(system_info *out) {
         std::snprintf(out->cpu_model, sizeof(out->cpu_model), "%s", model);
         
         int inferred_channels = 0;
-        
-        if (!try_detect_memory_freq(out->mem_frequency, &inferred_channels)) {
-            infer_memory_info_from_cpu(out->cpu_model, out->mem_technology, out->mem_frequency, &inferred_channels);
+
+        // Fast path first: infer from known CPU families and only run expensive probes when needed.
+        infer_memory_info_from_cpu(out->cpu_model, out->mem_technology, out->mem_frequency, &inferred_channels);
+
+        bool force_slow_memory_probe = false;
+        if (const char* env = std::getenv("MESS_SLOW_MEM_PROBE")) {
+            force_slow_memory_probe = (std::strcmp(env, "0") != 0);
+        }
+
+        if (!out->mem_frequency[0] || force_slow_memory_probe) {
+            int detected_channels = inferred_channels;
+            if (try_detect_memory_freq(out->mem_frequency, &detected_channels) && detected_channels > 0) {
+                inferred_channels = detected_channels;
+            }
+        }
+
+        if (!out->mem_technology[0]) {
+            std::snprintf(out->mem_technology, sizeof(out->mem_technology), "Unknown");
         }
         
         if (!out->mem_frequency[0]) {

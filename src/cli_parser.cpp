@@ -63,16 +63,7 @@ void CLIParser::display_configuration(const BenchmarkConfig& config, bool perf_a
         std::cout << "\n=== Settings used ===" << std::endl;
         std::cout << "Mode: " << "Custom configuration" << std::endl;
         
-        std::string size_str;
-        switch (config.size) {
-            case SizeTier::LITE: size_str = "Lite"; break;
-            case SizeTier::MEDIUM: size_str = "Medium"; break;
-            case SizeTier::FULL: size_str = "Full"; break;
-            default: size_str = "Custom";
-        }
-        std::cout << "Size tier: " << size_str << std::endl;
-        
-        std::cout << "Read ratios (%): ";
+        std::cout << "Load ratios (%): ";
         if (config.ratios_pct.size() > 10) {
             std::cout << config.ratios_pct.size() << " ratios (" 
                      << config.ratios_pct.front() << "% to " 
@@ -113,20 +104,18 @@ CLIParser::CLIParser() {
         {"", "version", false, "", "print version and exit"},
         {"h", "help", false, "", "print this help and exit"},
         {"r", "ratio", true, "X[,X...]", "read/write ratios in percent; comma-separated list"},
-        // {"s", "size", true, "small|medium|large|full", "benchmark size tier (default: full)"},
-        {"", "pause", true, "X[,X...]", "pause values in microseconds; comma-separated list"},
+        {"", "pause", true, "X[,X...]", "pause values; comma-separated list"},
         {"", "profile", false, "", "save bw/lat files to measuring/ directory"},
-
         {"", "dry-run", false, "", "detect system and print configuration without running benchmark"},
-        {"", "likwid", false, "", "force use of likwid for bandwidth measurement"},
+        {"", "measurer", true, "TYPE", "bandwidth measurement tool: auto, perf, likwid, pcm (default: auto)"},
         {"", "persistent-trafficgen", false, "", "keep TrafficGen alive across repetitions for the same point"},
-        {"v", "verbose", true, "N", "verbosity level (1-3, default: 1)"},
+        {"v", "verbose", true, "N", "verbosity level (0-4, default: 1)"},
         {"", "repetitions", true, "N", "number of point repetitions (default: 3)"},
         {"", "total-cores", true, "N", "number of cores to run TrafficGen workers on (default: TOTAL_CORES-1)"},
         {"", "cores", true, "LIST", "comma-separated list of specific cores to use (e.g. 0,1,2). Incompatible with --total-cores"},
         {"", "folder", true, "DIR", "root output folder (default: measuring)"},
         {"", "bind", true, "LIST", "comma-separated list of NUMA nodes to bind memory to (e.g. 0,1)"},
-        {"", "extra-perf", true, "COUNTERS", "comma-separated list of extra perf counters to measure alongside BW"}
+        {"", "add-counters", true, "COUNTERS", "comma-separated list of extra counters to measure alongside BW"}
     };
 }
 
@@ -137,12 +126,6 @@ bool CLIParser::parse(int argc, char** argv, BenchmarkConfig& config) {
             config.ratios_pct.push_back(static_cast<double>(ratio));
         }
         
-        config.pauses = {0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 80, 90, 100,
-                        120, 140, 160, 180, 200, 220, 260, 300, 340, 380, 450, 550, 600, 700,
-                        800, 900, 1000, 1500, 2000, 3000, 5000, 40000, 100000};
-        
-        config.size = SizeTier::FULL;
-
         config.verbosity = 1;
         
         return true;
@@ -150,6 +133,7 @@ bool CLIParser::parse(int argc, char** argv, BenchmarkConfig& config) {
     
     bool total_cores_flag_seen = false;
     bool explicit_cores_flag_seen = false;
+    bool repetitions_flag_seen = false;
     
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -167,18 +151,22 @@ bool CLIParser::parse(int argc, char** argv, BenchmarkConfig& config) {
         } else if (arg == "--pause") {
             if (i + 1 >= argc) { std::cerr << "error: --pause requires an argument" << std::endl; return false; }
             if (!parse_pauses(argv[++i], config.pauses)) { std::cerr << "error: invalid pause list '" << argv[i] << "'" << std::endl; return false; }
-            config.explicit_pauses = true;
         } else if (arg.find("--pause=") == 0) {
             std::string value = arg.substr(8);
             if (!parse_pauses(value.c_str(), config.pauses)) { std::cerr << "error: invalid pause '" << value << "'" << std::endl; return false; }
-            config.explicit_pauses = true;
         } else if (arg == "--profile") {
             config.profile_output = true;
 
-        } else if (arg == "--dry-run") { // Original: arg == "--dry-run"
+        } else if (arg == "--dry-run") {
             config.dry_run = true;
-        } else if (arg == "--likwid") { // Original: arg == "--likwid"
-            config.force_likwid = true;
+        } else if (arg == "--likwid") {
+            std::cerr << "error: --likwid is deprecated. Use --measurer=likwid instead." << std::endl;
+            return false;
+        } else if (arg == "--measurer") {
+            if (i + 1 >= argc) { std::cerr << "error: --measurer requires an argument" << std::endl; return false; }
+            config.measurer = argv[++i];
+        } else if (arg.find("--measurer=") == 0) {
+            config.measurer = arg.substr(11);
         } else if (arg == "--persistent-trafficgen" || arg == "--persistent-traffic-gen") {
             config.persistent_traffic_gen = true;
         } else if (arg == "--bind") {
@@ -197,7 +185,7 @@ bool CLIParser::parse(int argc, char** argv, BenchmarkConfig& config) {
         } else if (arg == "--verbose" || arg == "-v") {
             if (i + 1 >= argc) { std::cerr << "error: --verbose requires an argument" << std::endl; return false; }
             config.verbosity = std::stoi(argv[++i]);
-            if (config.verbosity < 1 || config.verbosity > 3) { std::cerr << "error: verbosity must be between 1 and 3" << std::endl; return false; }
+            if (config.verbosity < 0 || config.verbosity > 4) { std::cerr << "error: verbosity must be between 0 and 4" << std::endl; return false; }
         } else if (arg.find("--verbose=") == 0) {
             std::string value = arg.substr(10);
             config.verbosity = std::stoi(value);
@@ -210,10 +198,12 @@ bool CLIParser::parse(int argc, char** argv, BenchmarkConfig& config) {
             if (i + 1 >= argc) { std::cerr << "error: --repetitions requires an argument" << std::endl; return false; }
             config.point_reps = std::stoi(argv[++i]);
             if (config.point_reps < 1) { std::cerr << "error: repetitions must be >= 1" << std::endl; return false; }
+            repetitions_flag_seen = true;
         } else if (arg.find("--repetitions=") == 0) {
             std::string value = arg.substr(14);
             config.point_reps = std::stoi(value);
             if (config.point_reps < 1) { std::cerr << "error: repetitions must be >= 1" << std::endl; return false; }
+            repetitions_flag_seen = true;
         } else if (arg == "--total-cores") {
             if (i + 1 >= argc) { std::cerr << "error: --total-cores requires an argument" << std::endl; return false; }
             int c = std::stoi(argv[++i]);
@@ -253,23 +243,26 @@ bool CLIParser::parse(int argc, char** argv, BenchmarkConfig& config) {
             std::string value = arg.substr(9);
             if (value.empty()) { std::cerr << "error: folder must be non-empty" << std::endl; return false; }
             config.output_root = value;
-        } else if (arg == "--extra-perf") {
-            if (i + 1 >= argc) { std::cerr << "error: --extra-perf requires an argument" << std::endl; return false; }
+        } else if (arg == "--extra-perf" || arg.find("--extra-perf=") == 0) {
+            std::cerr << "error: --extra-perf is deprecated. Use --add-counters instead." << std::endl;
+            return false;
+        } else if (arg == "--add-counters") {
+            if (i + 1 >= argc) { std::cerr << "error: --add-counters requires an argument" << std::endl; return false; }
             std::string value = argv[++i];
             std::stringstream ss(value);
             std::string segment;
             while(std::getline(ss, segment, ',')) {
                 if (!segment.empty()) {
-                    config.extra_perf_counters.push_back(segment);
+                    config.add_counters.push_back(segment);
                 }
             }
-        } else if (arg.find("--extra-perf=") == 0) {
-            std::string value = arg.substr(13);
+        } else if (arg.find("--add-counters=") == 0) {
+            std::string value = arg.substr(15);
             std::stringstream ss(value);
             std::string segment;
             while(std::getline(ss, segment, ',')) {
                 if (!segment.empty()) {
-                    config.extra_perf_counters.push_back(segment);
+                    config.add_counters.push_back(segment);
                 }
             }
         } else {
@@ -284,6 +277,10 @@ bool CLIParser::parse(int argc, char** argv, BenchmarkConfig& config) {
         std::cerr << "ERROR: --total-cores and --cores are mutually exclusive." << std::endl;
         return false;
     }
+
+    if (repetitions_flag_seen && config.point_reps > 1000) {
+        std::cerr << "WARNING: High repetitions value (" << config.point_reps << ") may take a very long time. Consider using a lower value." << std::endl;
+    }
     
     return true;
 }
@@ -291,9 +288,8 @@ bool CLIParser::parse(int argc, char** argv, BenchmarkConfig& config) {
 void CLIParser::print_help(const char* argv0) {
     print_usage(argv0);
 
-    // Basic options (user-facing)
     std::cout << "\nBasic Options:\n";
-    std::vector<std::string> basic_opts = {"version", "help", "ratio", "size", "profile", "system", "dry-run", "verbose", "folder"};
+    std::vector<std::string> basic_opts = {"version", "help", "ratio", "profile", "system", "dry-run", "verbose", "folder"};
     
     for (const auto& spec : specs_) {
         if (std::find(basic_opts.begin(), basic_opts.end(), spec.long_opt) != basic_opts.end()) {
@@ -312,7 +308,6 @@ void CLIParser::print_help(const char* argv0) {
         }
     }
 
-    // Advanced options (expert tuning)
     std::cout << "\nAdvanced Options:\n";
     std::cout << "   Warning: These are for fine-tuning; ensure familiarity with the code\n";
     
@@ -342,20 +337,6 @@ void CLIParser::print_help(const char* argv0) {
 void CLIParser::print_usage(const char* argv0) {
     std::cout << "Usage: " << argv0 << " [options] [ratio]\n\n";
     std::cout << "Mess Benchmark 2.0 - Generic Memory System Characterization\n";
-}
-
-bool CLIParser::parse_size(const std::string& s, SizeTier& out) {
-    if (s == "lite") {
-        out = SizeTier::LITE;
-        return true;
-    } else if (s == "medium") {
-        out = SizeTier::MEDIUM;
-        return true;
-    } else if (s == "full") {
-        out = SizeTier::FULL;
-        return true;
-    }
-    return false;
 }
 
 bool CLIParser::parse_bind(const std::string& s, std::vector<int>& out) {

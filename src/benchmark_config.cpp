@@ -39,15 +39,6 @@
 
 
 
-std::string BenchmarkConfig::get_size_name() const {
-    switch (size) {
-        case SizeTier::LITE: return "lite";
-        case SizeTier::MEDIUM: return "medium";
-        case SizeTier::FULL: return "full";
-        default: return "unset";
-    }
-}
-
 std::string BenchmarkConfig::get_bind_name() const {
     if (memory_bind_nodes.empty()) {
         return "local";
@@ -69,7 +60,6 @@ void BenchmarkConfig::print_summary(std::ostream& os, bool dry_run) const {
     }
     
     os << "Benchmark Configuration:" << std::endl;
-    os << "  Size: " << get_size_name() << std::endl;
     os << "  Memory Bind: " << get_bind_name() << std::endl;
     os << "  Threads: " << (num_threads > 0 ? std::to_string(num_threads) : "auto") << std::endl;
 

@@ -42,8 +42,8 @@ iterations = {{ITERATIONS_VALUE}}
 burst_iterations = {{BURST_ITERS_VALUE}}
 
 # Compute derived parameters
-array_elems:=$(shell bc <<< "$(array_size) / $(cache_line_size)")
-loop_instr:=$(shell bc <<< "$(instructions) / $(iterations)")
+array_elems:=$(shell echo $$(( $(array_size) / $(cache_line_size) )))
+loop_instr:=$(shell echo $$(( $(instructions) / $(iterations) )))
 
 all: $(TARGET) array
 

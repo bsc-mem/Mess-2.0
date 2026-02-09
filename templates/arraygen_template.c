@@ -42,10 +42,11 @@ struct line{
     int pad[14];
 };
 
-int *seq, *res;
+int *res;
 struct line *array;
 
 void shuffle(int *array, size_t n) {
+    /* Deterministic seed keeps pointer-chase walk reproducible across runs. */
     srand(0);
     if (n > 1)
     {
@@ -87,11 +88,10 @@ void walk_generator(){
 }
 
 int main() {
-    seq = (int*)malloc(ARRAY_ELEMS * sizeof(int));
     res = (int*)malloc(ARRAY_ELEMS * sizeof(int));
     array = (struct line*)malloc(ARRAY_ELEMS * sizeof(struct line));
     
-    if (!seq || !res || !array) {
+    if (!res || !array) {
         printf("Memory allocation failed\n");
         return 1;
     }
@@ -107,7 +107,6 @@ int main() {
     fwrite(array, sizeof(struct line), ARRAY_ELEMS, f);
     fclose(f);
 
-    free(seq);
     free(res);
     free(array);
 

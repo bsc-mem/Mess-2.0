@@ -68,6 +68,7 @@ std::string replace_template_variables(const std::string& template_content,
 
 
 int main(int argc, char* argv[]) {
+    try {
     bool debug_mode = false;
     bool build_multisequential = true;
     
@@ -106,23 +107,10 @@ int main(int argc, char* argv[]) {
     auto architecture = ArchitectureRegistry::instance().getArchitecture(capabilities);
     auto assembler = architecture->createAssembler(config);
 
-    // Calculate TrafficGen array size and core count
-    uint64_t arg1 = 5ULL * 1000 * 1000 * 1000;
-    uint64_t arg2 = static_cast<uint64_t>(capabilities.l3_size) * 8;
-    uint64_t min_traffic_gen_size = std::max(arg1, arg2) / sizeof(double);
-
-    bool using_avx512 = (config.isa_mode == ISAMode::AVX512 || 
-                        (config.isa_mode == ISAMode::AUTO && 
-                         std::find(capabilities.extensions.begin(), 
-                                  capabilities.extensions.end(), 
-                                  ISAExtension::AVX512) != capabilities.extensions.end()));
-    
-    if (using_avx512) {
-        min_traffic_gen_size *= 2;
-    }
-
-    int num_cores = sysconf(_SC_NPROCESSORS_ONLN);
+    int num_cores = (sys_info.socket_count > 0) ? sys_info.sockets[0].core_count : 1;
     if (num_cores < 1) num_cores = 1;
+
+    bool using_avx512 = (config.isa_mode == ISAMode::AVX512);
 
     std::string output_dir = (root / "src/traffic_gen/src").string();
     generator.generate_kernel(output_dir);
@@ -216,11 +204,10 @@ int main(int argc, char* argv[]) {
     uint64_t array_size = std::max(default_array_size, l3_array); 
     
     KernelParameters pc_params = {
-        .array_size = array_size, 
-        .read_ratio = 1.0,                       
-        .stride = 1,                             
-        .use_prefetch = false,                
-        .use_nontemporal = false                 
+        .array_size = array_size,
+        .read_ratio = 1.0,
+        .stride = 1,
+        .use_nontemporal = false
     };
 
     uint64_t array_elements = pc_params.array_size / cache_line_size;
@@ -437,16 +424,33 @@ int main(int argc, char* argv[]) {
                 all_compiled = false;
                 installation_success = false;
             }
-            
+            uint64_t min_traffic_gen_size = calculate_traffic_gen_array_size(capabilities.l3_size);
+            if (using_avx512) {
+                min_traffic_gen_size *= 2;
+            }
+
             std::cout << "│ Compiling " << target_name << " (array: " << (min_traffic_gen_size * sizeof(double) / (1000*1000)) << " MB)" << std::endl;
-            
+
             std::filesystem::create_directories(root / "src/traffic_gen/build");
-            
+
             std::string clean_cmd = "cd " + (root / "src/traffic_gen").string() + " && make clean >/dev/null 2>&1";
             system(clean_cmd.c_str());
-            
-std::string build_cmd = "cd " + (root / "src/traffic_gen").string() + " && mkdir -p build && make -j" + std::to_string(num_cores) + " " + target_name + 
-                                   " CFLAGS=\"-DTrafficGen_ARRAY_SIZE=" + std::to_string(min_traffic_gen_size) + "\"" +
+
+            // Determine architecture-specific compiler flags
+            std::string arch_flags = "-march=native";
+            if (capabilities.arch == CPUArchitecture::ARM64) {
+                if (config.isa_mode == ISAMode::SVE) {
+                    // SVE requires explicit arch flags on some compilers
+                    arch_flags = "-march=armv8-a+sve";
+                } else {
+                    // NEON is the default for ARM64, -march=native should work
+                    arch_flags = "-march=native";
+                }
+            }
+
+std::string build_cmd = "cd " + (root / "src/traffic_gen").string() + " && mkdir -p build && make -j" + std::to_string(num_cores) + " " + target_name +
+                                   " CFLAGS=\"" + arch_flags + " -Wall -fopenmp -DTrafficGen_ARRAY_SIZE=" + std::to_string(min_traffic_gen_size) + "\"" +
+                                   " LDFLAGS=\"-pthread -lrt -fopenmp\"" +
                                    (debug_mode ? "" : " >/dev/null 2>&1");
             
             int build_result = system(build_cmd.c_str());
@@ -502,4 +506,11 @@ std::string build_cmd = "cd " + (root / "src/traffic_gen").string() + " && mkdir
     }
 
     return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "ERROR: " << e.what() << std::endl;
+        return 1;
+    } catch (...) {
+        std::cerr << "ERROR: Unknown failure during code generation." << std::endl;
+        return 1;
+    }
 }

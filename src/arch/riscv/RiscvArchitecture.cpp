@@ -34,18 +34,39 @@
 #include "arch/riscv/RiscvArchitecture.h"
 #include "arch/riscv/RiscvAssembler.h"
 #include "arch/riscv/counters/SiFiveCounters.h"
-#include "arch/riscv/RiscvCounters.h"  // Generic fallback
+#include "arch/riscv/RiscvCounters.h"
 #include "architecture/ArchitectureRegistry.h"
+#include "architecture/ISA.h"
 #include <algorithm>
 #include <string>
 #include <cctype>
-#include <algorithm>
+
+namespace {
+
+class RiscvISA : public ISA {
+public:
+    RiscvISA(ISAMode mode, std::string name, int width_bits, int regs)
+        : mode_(mode), name_(std::move(name)), width_bits_(width_bits), regs_(regs) {}
+
+    ISAMode getMode() const override { return mode_; }
+    std::string getName() const override { return name_; }
+    int getVectorWidthBits() const override { return width_bits_; }
+    int getMaxSimdRegisters() const override { return regs_; }
+
+private:
+    ISAMode mode_;
+    std::string name_;
+    int width_bits_;
+    int regs_;
+};
+
+}
 
 std::unique_ptr<KernelAssembler> RiscvArchitecture::createAssembler(const KernelConfig& config) const {
     return std::make_unique<RiscvAssembler>(config);
 }
 
-std::unique_ptr<PerformanceCounterStrategy> RiscvArchitecture::createCounterStrategy(const CPUCapabilities& caps) const {
+std::unique_ptr<BandwidthCounterStrategy> RiscvArchitecture::createCounterStrategy(const CPUCapabilities& caps) const {
     auto toLower = [](const std::string& str) {
         std::string result = str;
         std::transform(result.begin(), result.end(), result.begin(),
@@ -68,34 +89,26 @@ std::unique_ptr<PerformanceCounterStrategy> RiscvArchitecture::createCounterStra
     return std::make_unique<RiscvCounters>();
 }
 
-std::vector<std::shared_ptr<ISA>> RiscvArchitecture::getSupportedISAs() const { return {}; }
-std::shared_ptr<ISA> RiscvArchitecture::selectBestISA(const CPUCapabilities&) const { return nullptr; }
-
-std::string RiscvArchitecture::generateNopFile() const {
-    return R"(#include <stdlib.h>
-#include <stdio.h>
-
-extern "C" void volatile nop_(void) {
-    asm __volatile__ (
-        "bne x22, x0, start_pause;\n"
-        "j end;\n"
-        "start_pause:"
-        "mv x23, x22;\n"
-        "start_loop:\n"
-        "nop;\n"
-        "addi x23, x23, -1;\n"
-        "bne x23, x0, start_loop;\n"
-        "end:"
-        :
-        :
-        : "x30", "x4", "x10", "x23"
-    );
+std::vector<std::shared_ptr<ISA>> RiscvArchitecture::getSupportedISAs() const {
+    return {
+        std::make_shared<RiscvISA>(ISAMode::RVV1_0, "RVV1.0", 256, 32),
+        std::make_shared<RiscvISA>(ISAMode::RVV0_7, "RVV0.7", 256, 32),
+        std::make_shared<RiscvISA>(ISAMode::SCALAR, "SCALAR", 64, 16)
+    };
 }
 
-int nop(int *ntimes) {
-    return 0;
-}
-)";
+std::shared_ptr<ISA> RiscvArchitecture::selectBestISA(const CPUCapabilities& caps) const {
+    auto has = [&](ISAExtension e) {
+        return std::find(caps.extensions.begin(), caps.extensions.end(), e) != caps.extensions.end();
+    };
+
+    if (has(ISAExtension::RVV1_0)) {
+        return std::make_shared<RiscvISA>(ISAMode::RVV1_0, "RVV1.0", 256, 32);
+    }
+    if (has(ISAExtension::RVV0_7)) {
+        return std::make_shared<RiscvISA>(ISAMode::RVV0_7, "RVV0.7", 256, 32);
+    }
+    return std::make_shared<RiscvISA>(ISAMode::SCALAR, "SCALAR", 64, 16);
 }
 
 double RiscvArchitecture::getUpiScalingFactor(const CPUCapabilities&) const {

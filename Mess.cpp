@@ -47,15 +47,15 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <sstream>
 
 #include "system_detection.h"
 #include "architecture/ArchitectureRegistry.h"
-#include "architecture/PerformanceCounterStrategy.h"
+#include "architecture/BandwidthCounterStrategy.h"
 #include "benchmark_config.h"
 #include "codegen.h"
 #include "measurement.h"
-#include "measurement/bw_measurers/LikwidBandwidthMeasurer.h"
 #include "benchmark_executor.h"
 #include "results_processor.h"
 #include "cli_parser.h"
@@ -100,7 +100,66 @@ void cleanup_empty_output_dirs(const BenchmarkConfig& config) {
     }
 }
 
+struct PerfAccessProbeResult {
+    int paranoid_level = 3;
+    bool perf_accessible = false;
+};
+
+PerfAccessProbeResult probe_perf_access() {
+    PerfAccessProbeResult result;
+    std::ifstream paranoid_file("/proc/sys/kernel/perf_event_paranoid");
+    if (paranoid_file.is_open()) {
+        paranoid_file >> result.paranoid_level;
     }
+
+    if (result.paranoid_level <= 1) {
+        result.perf_accessible = run_command_success("perf stat -e cycles:k true 2>/dev/null >/dev/null");
+    }
+    return result;
+}
+
+struct KernelBinaryCheckResult {
+    bool ok = true;
+    std::string error_message;
+};
+
+KernelBinaryCheckResult validate_runtime_binaries() {
+    KernelBinaryCheckResult result;
+    std::error_code ec;
+    const std::filesystem::path exe_path = std::filesystem::canonical("/proc/self/exe", ec);
+    if (ec) {
+        result.ok = false;
+        result.error_message = "ERROR: Could not determine executable path at /proc/self/exe.";
+        return result;
+    }
+
+    const std::filesystem::path bin_dir = exe_path.parent_path();
+    const std::filesystem::path ptr_chase_path = bin_dir / "ptr_chase";
+    const std::filesystem::path traffic_gen_path = bin_dir / "traffic_gen_multiseq.x";
+
+    if (!std::filesystem::exists(ptr_chase_path)) {
+        std::ostringstream oss;
+        oss << "ERROR: Kernel binaries not found!" << std::endl;
+        oss << "       Expected ptr_chase at: " << ptr_chase_path << std::endl;
+        oss << "       Please run generate_code to compile the kernels.";
+        result.ok = false;
+        result.error_message = oss.str();
+        return result;
+    }
+
+    if (!std::filesystem::exists(traffic_gen_path)) {
+        std::ostringstream oss;
+        oss << "ERROR: TrafficGen kernel not found!" << std::endl;
+        oss << "       Expected traffic_gen_multiseq.x at: " << traffic_gen_path << std::endl;
+        oss << "       Please run generate_code to compile the kernels.";
+        result.ok = false;
+        result.error_message = oss.str();
+    }
+
+    return result;
+}
+
+}
 
 
 BenchmarkExecutor* g_executor = nullptr;
@@ -117,12 +176,14 @@ void signal_handler(int signal) {
         if (g_executor) {
             g_executor->force_cleanup();
         }
-        
-        system("pkill -9 -f 'traffic_gen_.*\\.x' 2>/dev/null || true");
-        system("pkill -9 '^traffic_gen_' 2>/dev/null || true");
-        system("pkill -9 -f 'perf.*ptr_chase' 2>/dev/null || true");
-        system("pkill -9 ptr_chase 2>/dev/null || true");
-        system("rm -f /tmp/traffic_gen_pid_* /tmp/ptr_chase_perf_* /tmp/ptr_chase_ready_*.flag /tmp/ptr_chase_start_*.flag /tmp/mess_ptrchase_pipe_* /tmp/ptr_chase_*.log 2>/dev/null");
+
+        system("pkill -u $(id -u) -TERM -x traffic_gen_multiseq.x 2>/dev/null || true");
+        system("pkill -u $(id -u) -TERM -x traffic_gen_rand.x 2>/dev/null || true");
+        system("pkill -u $(id -u) -TERM -x ptr_chase 2>/dev/null || true");
+        system("pkill -u $(id -u) -KILL -x traffic_gen_multiseq.x 2>/dev/null || true");
+        system("pkill -u $(id -u) -KILL -x traffic_gen_rand.x 2>/dev/null || true");
+        system("pkill -u $(id -u) -KILL -x ptr_chase 2>/dev/null || true");
+        system("rm -f /tmp/traffic_gen_pid_* /tmp/ptr_chase_perf_* /tmp/ptr_chase_ready_*.flag /tmp/ptr_chase_start_*.flag /tmp/mess_ptrchase_pipe_* /tmp/mess_tgen_ready_* /tmp/ptr_chase_*.log 2>/dev/null");
         
         std::signal(signal, SIG_DFL);
         raise(signal);
@@ -191,87 +252,118 @@ int main(int argc, char **argv) {
         }
 
         SystemDetector detector;
-        if (!detector.detect()) {
+        auto detect_future = std::async(std::launch::async, [&detector]() {
+            return detector.detect();
+        });
+        auto cache_future = std::async(std::launch::async, []() {
+            SystemToolsCache::instance().init();
+        });
+        auto perf_probe_future = std::async(std::launch::async, []() {
+            return probe_perf_access();
+        });
+
+        std::future<KernelBinaryCheckResult> kernel_check_future;
+        if (!config->dry_run) {
+            kernel_check_future = std::async(std::launch::async, []() {
+                return validate_runtime_binaries();
+            });
+        }
+
+        if (!detect_future.get()) {
             std::cerr << "Failed to detect system information" << std::endl;
             return EXIT_FAILURE;
         }
 
-        SystemToolsCache::instance().init();
-
         print_enhanced_header(detector);
 
-        if (!config->dry_run) {
-            std::filesystem::path exe_path = std::filesystem::canonical("/proc/self/exe");
-            std::filesystem::path bin_dir = exe_path.parent_path();
-            
-            std::filesystem::path ptr_chase_path = bin_dir / "ptr_chase";
-            std::filesystem::path traffic_gen_path = bin_dir / "traffic_gen_multiseq.x";
-            
-            if (!std::filesystem::exists(ptr_chase_path)) {
-                std::cerr << "ERROR: Kernel binaries not found!" << std::endl;
-                std::cerr << "       Expected ptr_chase at: " << ptr_chase_path << std::endl;
-                std::cerr << "       Please run generate_code to compile the kernels." << std::endl;
-                return EXIT_FAILURE;
-            }
-            
-            if (!std::filesystem::exists(traffic_gen_path)) {
-                std::cerr << "ERROR: TrafficGen kernel not found!" << std::endl;
-                std::cerr << "       Expected traffic_gen_multiseq.x at: " << traffic_gen_path << std::endl;
-                std::cerr << "       Please run generate_code to compile the kernels." << std::endl;
+        if (detector.get_capabilities().arch == CPUArchitecture::RISCV64) {
+            std::cerr << "\n\033[1;33mWarning: RISC-V support is work-in-progress.\033[0m" << std::endl;
+            std::cerr << "Assembly generation, latency measurement and counter detection are available," << std::endl;
+            std::cerr << "but bandwidth measurement is not yet implemented for RISC-V platforms." << std::endl;
+            std::cerr << "RISC-V does not expose uncore memory controller counters (CAS) via perf;" << std::endl;
+            std::cerr << "bandwidth approximation via alternative counters is planned for a future release.\n" << std::endl;
+            if (!config->dry_run) {
+                std::cerr << "\033[1;31mError: Cannot run the full benchmark on RISC-V yet.\033[0m" << std::endl;
+                std::cerr << "Use --dry-run to inspect system detection and counter discovery.\n" << std::endl;
                 return EXIT_FAILURE;
             }
         }
 
+        if (kernel_check_future.valid()) {
+            KernelBinaryCheckResult kernel_check = kernel_check_future.get();
+            if (!kernel_check.ok) {
+                std::cerr << kernel_check.error_message << std::endl;
+                return EXIT_FAILURE;
+            }
+        }
+
+        const auto perf_probe = perf_probe_future.get();
+        const int paranoid_level = perf_probe.paranoid_level;
+        const bool perf_accessible = perf_probe.perf_accessible;
+
+        std::future<TLBMeasurement> tlb_future;
         const std::string status_prefix = "Initial status: ";
         std::cout << status_prefix << "\033[33mChecking...\033[0m" << std::string(10, ' ') << "\r" << std::flush;
-        
-        std::ifstream paranoid_file("/proc/sys/kernel/perf_event_paranoid");
-        int paranoid_level = 3;
-        if (paranoid_file.is_open()) {
-            paranoid_file >> paranoid_level;
-            paranoid_file.close();
-        }
-
-        bool perf_accessible = false;
-        if (paranoid_level <= 1) {
-            perf_accessible = run_command_success("perf stat -e cycles:k true 2>/dev/null >/dev/null");
-        }
-        
         if (perf_accessible) {
             std::cout << status_prefix << "\033[33mMeasuring TLB...\033[0m" << std::string(5, ' ') << "\r" << std::flush;
-            tlb_measurement = measure_and_set_tlb_latency();
-            tlb_ok = (tlb_measurement.latency_ns > 0);
+            tlb_future = std::async(std::launch::async, []() {
+                return measure_and_set_tlb_latency();
+            });
         } else {
             std::cout << status_prefix << "\033[33mSkipping TLB measurement (performance counters not accessible)\033[0m" << std::string(5, ' ') << "\r" << std::flush;
             tlb_ok = false;
-            tlb_measurement.latency_ns = 0;
+            tlb_measurement.latency_ns = 0.0;
         }
-        
-        bool overall_ok = perf_accessible && tlb_ok;
-        
 
-        
+        const auto& caps = detector.get_capabilities();
+
+        int src_cpu = 0;
+        if (!config->traffic_gen_explicit_cores.empty()) {
+            try {
+                src_cpu = std::stoi(config->traffic_gen_explicit_cores[0]);
+            } catch (...) {}
+        }
+
+        std::vector<int> target_nodes = config->memory_bind_nodes;
+        if (target_nodes.empty()) {
+            target_nodes.push_back(0);
+        }
+
+        auto& bw_strategy = BandwidthCounterStrategy::instance();
+        bw_strategy.set_measurer_type(string_to_measurer_type(config->measurer));
+        bw_strategy.set_extra_counters(config->add_counters);
+        bw_strategy.set_memory_type(caps.memory_type);
+        auto counter_discovery_future = std::async(std::launch::async, [&bw_strategy, src_cpu, &target_nodes, &caps]() {
+            bw_strategy.initialize(src_cpu, target_nodes, caps);
+        });
+
+        if (perf_accessible && tlb_future.valid()) {
+            tlb_measurement = tlb_future.get();
+            tlb_ok = (tlb_measurement.latency_ns > 0);
+        }
+
+        counter_discovery_future.get();
+        cache_future.get();
+
+        bool overall_ok = perf_accessible && tlb_ok;
+
         std::cout << "\r" << std::string(80, ' ') << "\r";
         std::cout << status_prefix;
-        
+
         if (overall_ok) {
             std::cout << "\033[32mOK\033[0m" << std::endl;
-            
             parser.display_configuration(*config, perf_accessible, paranoid_level, tlb_ok, tlb_measurement.latency_ns);
         } else {
             std::cout << "\033[31mKO\033[0m" << std::endl;
-            
+
             if (!perf_accessible) {
                 std::cout << "  → Performance counter access denied (paranoid level: " << paranoid_level << ")" << std::endl;
                 std::cout << "    Required for benchmark execution. Try: echo 0 | sudo tee /proc/sys/kernel/perf_event_paranoid" << std::endl;
             }
-            if (!tlb_ok) {
+            if (perf_accessible && !tlb_ok) {
                 std::cout << "  → TLB measurement not available (using default values)" << std::endl;
-            } else {
-                std::cout << "  → Performance counter access denied (paranoid level: " << paranoid_level << ")" << std::endl;
-                std::cout << "    Required for benchmark execution. Try: echo 0 | sudo tee /proc/sys/kernel/perf_event_paranoid" << std::endl;
             }
-            
+
             if (!config->dry_run) {
                 std::cerr << "\n\033[1;31mError: System configuration check failed\033[0m" << std::endl;
                 std::cerr << "Benchmark cannot run on this system. Please check the configuration and try again.\n" << std::endl;
@@ -279,17 +371,18 @@ int main(int argc, char **argv) {
             }
         }
 
+        uint64_t tlb1_raw = 0, tlb2_raw = 0;
+        bool use_tlb1 = false, use_tlb2 = false;
+        bw_strategy.get_tlb_counters(tlb1_raw, tlb2_raw, use_tlb1, use_tlb2);
+        
         if (config->dry_run) {
             std::cout << "\n=== Dry Run Mode ===" << std::endl;
             config->print_summary(std::cout, true);
-            
+
+            auto architecture = ArchitectureRegistry::instance().getArchitecture(caps);
+
             std::cout << "\n=== Memory Architecture & Counter Discovery ===" << std::endl;
-            
-            std::cout.setstate(std::ios_base::failbit); 
-                        
-            std::cout.clear(); 
-            
-            const auto& caps = detector.get_capabilities();
+            std::cout << "Detected Architecture: " << (architecture ? architecture->getName() : "Unknown") << std::endl;
             std::cout << "Memory Configuration:\n";
             std::cout << "  Type: " << caps.memory_type;
             if (!caps.memory_frequency.empty()) {
@@ -298,7 +391,7 @@ int main(int argc, char **argv) {
             std::cout << "\n";
             std::cout << "  Channels: " << caps.memory_channels << "\n";
             std::cout << "  Total Size: " << (caps.total_memory / (1000*1000*1000)) << " GB\n\n";
-            
+
             int num_cores = config->traffic_gen_cores;
             if (num_cores <= 0) {
                 num_cores = detector.get_system_info().sockets[0].core_count - 1;
@@ -307,155 +400,17 @@ int main(int argc, char **argv) {
 
             std::cout << "TrafficGen Configuration:\n";
             std::cout << "  Cores: " << num_cores << "\n";
-            std::cout << std::endl;
+            std::cout << "  Memory Binding: " << config->get_bind_name() << "\n\n";
 
-            std::cout << "Bindings:" << std::endl;
-
-
-            auto& registry = ArchitectureRegistry::instance();
-            auto architecture = registry.getArchitecture(caps);
-            if (!architecture) {
-                std::cerr << "Error: Unsupported architecture." << std::endl;
-                return 1;
-            }
-            std::cout << "Detected Architecture: " << architecture->getName() << std::endl;
-
-            KernelConfig kernel_config;
-
-            const char* ops_env = std::getenv("MESS_OPS_PER_BLOCK");
-            if (ops_env) kernel_config.ops_per_pause_block = std::atoi(ops_env);
-
-            KernelGenerator generator(kernel_config, caps);
-            ArchitectureConfig arch_config = generator.setup_architecture_config();
-
-            auto counterStrategy = architecture->createCounterStrategy(caps);
-            int src_cpu = 0;
-            if (!config->traffic_gen_explicit_cores.empty()) {
-                try {
-                    src_cpu = std::stoi(config->traffic_gen_explicit_cores[0]);
-                } catch (...) {}
-            }
-
-            std::vector<int> target_nodes = config->memory_bind_nodes;
-            if (target_nodes.empty()) {
-                target_nodes.push_back(0); 
-            }
-
-            auto bw_counters = PerformanceCounterStrategy::discoverBandwidthCounters(src_cpu, target_nodes, config->force_likwid);
-            
-            std::cout << "  Memory Binding: " << config->get_bind_name() << std::endl;
-            std::cout << std::endl;
-            
-            bool is_hbm = caps.memory_type.find("HBM") != std::string::npos;
-            bool needs_upi = (bw_counters.type == CounterType::UPI_FLITS);
-            
-            if (is_hbm && needs_upi && !config->force_likwid) {
-                std::cout << "Bandwidth Measurement Tool: perf (HBM with remote/cross-socket access)" << std::endl;
-                std::cout << "UPI/Interconnect Counters (Remote Bandwidth):" << std::endl;
-                if (bw_counters.perf_available) {
-                    if (bw_counters.upi.has_rxl_txl) {
-                        std::cout << "  RXL Events: " << bw_counters.upi.get_rxl_events_string() << std::endl;
-                        std::cout << "  TXL Events: " << bw_counters.upi.get_txl_events_string() << std::endl;
-                        if (bw_counters.upi.requires_link_aggregation) {
-                            std::cout << "  (Link aggregation required: Yes)" << std::endl;
-                        }
-                    } else {
-                        std::cout << "  No suitable UPI counters found." << std::endl;
-                        if (!bw_counters.upi.failure_reason.empty()) {
-                            std::cout << "  Reason: " << bw_counters.upi.failure_reason << std::endl;
-                        }
-                    }
-                } else {
-                    std::cout << "  perf not available." << std::endl;
-                }
-            } else if (is_hbm || config->force_likwid) {
-                std::string mode = is_hbm ? "HBM Mode" : "MBOX Mode (Forced)";
-                std::cout << "Bandwidth Measurement Tool: LIKWID (" << mode << ")" << std::endl;
-                
-                LikwidBandwidthMeasurer likwid_measurer(*config, detector.get_system_info(), nullptr, nullptr, [](){ return std::vector<int>{}; }, ExecutionMode::MULTISEQUENTIAL);
-                std::string likwidCmd = likwid_measurer.find_likwid_binary();
-                if (!likwidCmd.empty()) {
-                    std::string memType = is_hbm ? "HBM" : "MBOX";
-                    std::string eventStr = likwid_measurer.build_event_string(likwidCmd, memType, bw_counters.type);
-                    if (!eventStr.empty()) {
-                        std::cout << "  Likwid Counters: " << eventStr << std::endl;
-                    } else {
-                        std::cout << "  Likwid Counters: (Failed to discover counters)" << std::endl;
-                    }
-                } else {
-                    std::cout << "  Likwid Counters: (likwid-perfctr not found)" << std::endl;
-                }
-            } else if (caps.memory_type == "CXL") {
-                std::cout << "Bandwidth Measurement Tool: Intel PCM (CXL Mode)" << std::endl;
-                std::cout << "  PCM Counters: (Placeholder)" << std::endl;
-            } else {
-                std::cout << "Bandwidth Measurement Tool: perf (Standard)" << std::endl;
-                if (bw_counters.type == CounterType::UPI_FLITS) {
-                    std::cout << "UPI/Interconnect Counters (Remote Bandwidth):" << std::endl;
-                    if (bw_counters.perf_available) {
-                        if (bw_counters.upi.has_rxl_txl) {
-                            std::cout << "  RXL Events: " << bw_counters.upi.get_rxl_events_string() << std::endl;
-                            std::cout << "  TXL Events: " << bw_counters.upi.get_txl_events_string() << std::endl;
-                            if (bw_counters.upi.requires_link_aggregation) {
-                                std::cout << "  (Link aggregation required: Yes)" << std::endl;
-                            }
-                        } else {
-                            std::cout << "  No suitable UPI counters found." << std::endl;
-                            if (!bw_counters.upi.failure_reason.empty()) {
-                                std::cout << "  Reason: " << bw_counters.upi.failure_reason << std::endl;
-                            }
-                        }
-                    } else {
-                        std::cout << "  perf not available." << std::endl;
-                    }
-                } else {
-                    std::cout << "CAS Counters (Local Bandwidth):" << std::endl;
-                    if (bw_counters.perf_available) {
-                        if (bw_counters.cas.has_read_write) {
-                            std::cout << "  Read Events: " << bw_counters.cas.get_read_events_string() << std::endl;
-                            std::cout << "  Write Events: " << bw_counters.cas.get_write_events_string() << std::endl;
-                            if (bw_counters.cas.requires_channel_aggregation) {
-                                std::cout << "  (Aggregation required: Yes)" << std::endl;
-                            }
-                        } else if (bw_counters.cas.has_combined_counter) {
-                            std::cout << "  Combined Events: " << bw_counters.cas.get_all_events_string() << std::endl;
-                        } else {
-                            std::cout << "  No suitable CAS counters found." << std::endl;
-                            if (!bw_counters.cas.failure_reason.empty()) {
-                                std::cout << "  Reason: " << bw_counters.cas.failure_reason << std::endl;
-                            }
-                        }
-                    } else {
-                        std::cout << "  perf not available." << std::endl;
-                    }
-                }
-            }
-            std::cout << std::endl;
-            
+            std::cout << "=== Counter Discovery Results ===" << std::endl;
+            std::cout << "Measurer: " << bw_strategy.get_measurer_name() << std::endl;
             std::cout << "Latency Counters: cycles,instructions" << std::endl;
-            
-            std::cout << "Bandwidth Counters: ";
-            if (is_hbm && needs_upi && !config->force_likwid) {
-                std::cout << bw_counters.get_all_events_string();
-            } else if (is_hbm || config->force_likwid) {
-                std::cout << "LIKWID (CAS_COUNT_RD/WR)";
-            } else if (caps.memory_type == "CXL") {
-                std::cout << "PCM (Placeholder)";
-            } else if (bw_counters.perf_available && bw_counters.is_valid()) {
-                std::cout << bw_counters.get_all_events_string();
-            } else {
-                std::cout << "None available";
-            }
-            std::cout << std::endl;
-            
+            bw_strategy.print_counter_info(std::cout);
+
             if (tlb_ok) {
                 std::cout << "TLB Hit Latency: " << tlb_measurement.latency_ns << " ns" << std::endl;
                 std::cout << "Cache Line Size: " << tlb_measurement.cache_line_size << " bytes" << std::endl;
             }
-
-            uint64_t tlb1_raw = 0, tlb2_raw = 0;
-            bool use_tlb1 = false, use_tlb2 = false;
-            ptrchase_perf::select_tlb_events_for_ptrchase(detector.get_system_info(), tlb1_raw, tlb2_raw, use_tlb1, use_tlb2);
 
             std::cout << "TLB Page Walk Counters:" << std::endl;
             if (use_tlb1) {
@@ -467,7 +422,7 @@ int main(int argc, char **argv) {
             if (!use_tlb1 && !use_tlb2) {
                 std::cout << "  None defined for this architecture" << std::endl;
             }
-            
+
             std::cout << "\nDry run complete - the benchmark was not executed." << std::endl;
             return EXIT_SUCCESS;
         }
@@ -477,13 +432,11 @@ int main(int argc, char **argv) {
             for (int ratio = 0; ratio <= 100; ratio += 2) {
                 config->ratios_pct.push_back(static_cast<double>(ratio));
             }
-            config->size = SizeTier::FULL;
             if (config->verbosity >= 2) {
-                std::cout << "System benchmark enabled: running all ratios (0-100%) with full size" << std::endl;
+                std::cout << "System benchmark enabled: running all ratios (0-100%)" << std::endl;
             }
         }
 
-        // Verbose info block for normal execution
         if (config->verbosity >= 3) {
             std::cout << "\n=== Memory Architecture & Counter Discovery ===" << std::endl;
             std::cout << "Memory Configuration:\n";
@@ -562,6 +515,8 @@ int main(int argc, char **argv) {
         std::cerr << "Unknown error occurred" << std::endl;
         return EXIT_FAILURE;
     }
+
+    
 
     return EXIT_SUCCESS;
 }

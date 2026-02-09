@@ -34,33 +34,7 @@
 #include "arch/x86/counters/IntelGraniteRapidsCounters.h"
 
 CasCounterSelection IntelGraniteRapidsCounters::detectCasCounters() {
-    std::vector<std::string> preferred_read;
-    std::vector<std::string> preferred_write;
-
-    // Generate candidates for up to 32 sub-channels
-    for (int i = 0; i < 32; ++i) {
-        preferred_read.push_back("unc_m_cas_count_sch" + std::to_string(i) + ".rd");
-        preferred_write.push_back("unc_m_cas_count_sch" + std::to_string(i) + ".wr");
-    }
-    
-    CasCounterSelection result = discoverFromPerf(preferred_read, preferred_write, {});
-    
-    if (result.read_events.empty() || result.write_events.empty()) {
-        result = discoverFromPerf();
-    }
-    
-    if (!result.read_events.empty() && !result.write_events.empty()) {
-        bool uses_sch_counters = false;
-        for (const auto& evt : result.read_events) {
-            if (evt.find("unc_m_cas_count_sch") != std::string::npos) {
-                uses_sch_counters = true;
-                break;
-            }
-        }
-        result.requires_channel_aggregation = uses_sch_counters;
-    }
-    
-    return result;
+    return discoverFromPerf();
 }
 
 void IntelGraniteRapidsCounters::getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) {

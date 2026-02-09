@@ -49,6 +49,7 @@ enum class ISAMode {
     AVX512,
     AVX2,
     AVX,
+    SCALAR,
 
     // ARM64
     SVE,
@@ -67,7 +68,6 @@ struct KernelParameters {
     size_t array_size;
     double read_ratio;
     int stride;
-    bool use_prefetch;
     bool use_nontemporal;
 };
 
@@ -80,8 +80,7 @@ struct KernelConfigMultiSeq {
     int num_simd_registers = 30;
     
     ISAMode isa_mode = ISAMode::AUTO;
-    
-    bool enable_prefetch = true;
+
     bool enable_interleaving = true;
     bool use_nontemporal_stores = false;
     bool single_registers = true;

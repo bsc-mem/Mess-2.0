@@ -40,15 +40,6 @@
 #include <cstdint>
 #include <map>
 
-enum class SizeTier {
-    LITE,
-    MEDIUM,
-    FULL,
-    UNSET
-}; //This will be reviewed when we implement features in future. The idea is we can customize the amount of pause values here...
-
-
-
 #include "kernel_types.h"
 
 struct BenchmarkResult {
@@ -87,10 +78,8 @@ struct BenchmarkConfig {
     bool show_version = false;
     bool show_help = false;
 
-    SizeTier size = SizeTier::FULL;
     std::vector<double> ratios_pct;
     std::vector<int> pauses;
-    bool explicit_pauses = false;
     std::vector<int> memory_bind_nodes; // List of NUMA nodes to bind memory to
 
     int num_threads = 0;
@@ -101,20 +90,17 @@ struct BenchmarkConfig {
 
     bool profile_output = false;
     bool dry_run = false;
-    bool force_likwid = false;
     bool generate_multiseq = true;
     bool persistent_traffic_gen = false;
 
-    std::string bw_tool = "auto";
-    std::string lat_tool = "auto";
+    std::string measurer = "auto";  // auto, perf, likwid, pcm
 
     int traffic_gen_cores = 0;
     std::vector<std::string> traffic_gen_explicit_cores;
     std::string output_root = "measuring";
 
-    std::vector<std::string> extra_perf_counters;
+    std::vector<std::string> add_counters;
 
-    std::string get_size_name() const;
     std::string get_bind_name() const;
     void print_summary(std::ostream& os, bool dry_run = false) const;
 };

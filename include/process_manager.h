@@ -99,7 +99,7 @@ struct TrafficGenPreparation {
 class TrafficGenProcessManager {
 public:
     TrafficGenProcessManager(const BenchmarkConfig& config, const system_info& sys_info);
-    ~TrafficGenProcessManager() = default;
+    ~TrafficGenProcessManager();
 
     bool prepare_traffic_gen(double ratio_pct,
                            int pause,
@@ -130,12 +130,14 @@ public:
                                  double& elapsed,
                                  double& bw_gb_s);
 
+    bool wait_for_traffic_gen_ready(int timeout_seconds = 120);
+
     pid_t current_traffic_gen_pid() const { return current_traffic_gen_pid_; }
     pid_t active_traffic_gen_pid() const { return active_traffic_gen_pid_; }
 
 private:
     const BenchmarkConfig& config_;
-
+    const system_info& sys_info_;
 
     bool keep_traffic_gen_on_retry_;
     long long retry_bw_cas_rd_;
@@ -154,18 +156,26 @@ private:
 
     bool launch_traffic_gen_multiseq(double ratio_pct, int pause, int cores, const std::vector<int>& mem_nodes, const std::string& log_file, pid_t& out_pid) const;
     
+
+    bool launch_traffic_gen_impl(double ratio_pct, int pause, int cores, const std::vector<int>& mem_nodes, const std::string& log_file, pid_t& out_pid) const;
+    
 #if USE_MPI_SPAWN
-    bool launch_traffic_gen_mpi(double ratio_pct, int pause, int cores, const std::vector<int>& mem_nodes, const std::string& log_file, pid_t& out_pid, ExecutionMode mode);
+    bool launch_traffic_gen_mpi(double ratio_pct, int pause, int cores, const std::vector<int>& mem_nodes, const std::string& log_file, pid_t& out_pid) const;
 #endif
     bool read_traffic_gen_pid(const std::string& pid_filename, pid_t& traffic_gen_pid) const;
     bool cleanup_zombie_traffic_gen() const;
     std::string get_membind_arg(int default_node) const;
 
+    std::string unique_id_;
+    std::string ready_fifo_path_;
+    mutable int expected_ready_count_;
+
+    void generate_unique_names();
+
     mutable std::vector<std::string> cached_core_list_;
     mutable int cached_traffic_gen_cores_;
     mutable std::vector<std::string> cached_explicit_cores_;
     
-    // Helper to get cores with caching
     bool resolve_core_list(int traffic_gen_cores, const std::vector<std::string>& explicit_cores, std::vector<std::string>& out_cores) const;
 };
 

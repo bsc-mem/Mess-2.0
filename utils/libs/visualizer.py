@@ -1,5 +1,6 @@
 import os
 import matplotlib.pyplot as plt
+import warnings
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import matplotlib.patches as patches
@@ -114,13 +115,17 @@ def is_valid_curve(df,
                    min_points=5,
                    max_cluster_fraction=0.4,
                    gap_fraction=0.5,        # NEW: max allowed jump in GB/s
-                   bw_column='bandwidth_mean'):
+                   bw_column='bandwidth_mean',
+                   ignore_guards=False):
     """
     Comprehensive validity check:
     - Spans enough bandwidth
     - Not a tight cluster
     - No huge straight-line jumps (artifacts)
     """
+
+    if ignore_guards:
+        return True, "valid (forced)"
 
     if df.empty or len(df) < min_points:
         return False, "too_few_points"
@@ -158,7 +163,7 @@ def is_valid_curve(df,
 
 
 
-def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blues', limit_bw_override=None, limit_lat_override=None):
+def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blues', limit_bw_override=None, limit_lat_override=None, ignore_guards=False):
     """Plot bandwidth-latency curves and save to PDF"""
     if not dfs_rw:
         print("No data to plot")
@@ -251,7 +256,8 @@ def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blue
                 df,
                 min_points=5,
                 max_cluster_fraction=0.70,
-                gap_fraction=0.5)
+                gap_fraction=0.5,
+                ignore_guards=ignore_guards)
             if is_valid: 
                 ax.plot(df['bandwidth_smooth'], df['latency_smooth'], 
                     color=calculate_color(rw, cmap_name), linewidth=2, 
@@ -262,7 +268,8 @@ def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blue
                 skipped_ratios[reason].append(rw)
 
     for reason, ratios in skipped_ratios.items():
-        print(f"Warning: Ratios {ratios} not plotted: {reason}")
+        #print(f"Warning: Ratios {ratios} not plotted: {reason}")
+        pass
 
     
     is_nvidia_pmu = config.get("USE_NVIDIA_PMU", "False").lower() in ('true', '1', 't')
@@ -284,16 +291,18 @@ def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blue
     add_gradient_legend(ax, None, 50, 100, colors=cmap_name,box_position=(base_x, base_y), box_size=(0.25, 0.03), fontsize=20)
 
     fig.set_size_inches([16, 9])
-    fig.tight_layout()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig.tight_layout()
     fig.savefig(output_path, bbox_inches='tight', dpi=300)
     png_path = os.path.splitext(output_path)[0] + '.png'
     fig.savefig(png_path, bbox_inches='tight', dpi=300)
     plt.close()
     
-    print(f"Plot saved to: {output_path}")
-    print(f"Plot saved to: {png_path}")
+    #print(f"Plot saved to: {output_path}")
+    #print(f"Plot saved to: {png_path}")
 
-def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_override=None, limit_lat_override=None):
+def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_override=None, limit_lat_override=None, ignore_guards=False):
     """
     Plot multiple datasets on the same figure.
     datasets: list of tuples (label, dfs_rw, config, cmap_name)
@@ -407,7 +416,8 @@ def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_o
                     df,
                     min_points=5,
                     max_cluster_fraction=0.70,
-                    gap_fraction=0.5)
+                    gap_fraction=0.5,
+                    ignore_guards=ignore_guards)
                 if is_valid:
                     curve_label = f'{label} (Rd:Wr {rw}:0)' if first_curve else None
                     first_curve = False
@@ -442,7 +452,8 @@ def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_o
         
         for reason, ratios in skipped_ratios.items():
             ratio_values = [int(r) for r in ratios]
-            print(f"Warning: {label} - Ratios {ratio_values} not plotted: {reason}")
+            ratio_values = [int(r) for r in ratios]
+            #print(f"Warning: {label} - Ratios {ratio_values} not plotted: {reason}")
                 
     # Check configs from all datasets for NVIDIA PMU and NVLINK BW
     is_any_nvidia_pmu = any(cfg.get("USE_NVIDIA_PMU", "False").lower() in ('true', '1', 't') for _, _, cfg, _, _ in datasets)
@@ -464,11 +475,13 @@ def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_o
     #ax.legend(custom_lines, custom_labels, fontsize=fontSizeMess)
 
     fig.set_size_inches([16, 9])
-    fig.tight_layout()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig.tight_layout()
     fig.savefig(output_path, bbox_inches='tight', dpi=300)
     png_path = os.path.splitext(output_path)[0] + '.png'
     fig.savefig(png_path, bbox_inches='tight', dpi=300)
     plt.close()
     
-    print(f"Combined plot saved to: {output_path}")
-    print(f"Combined plot saved to: {png_path}")
+    #print(f"Combined plot saved to: {output_path}")
+    #print(f"Combined plot saved to: {png_path}")

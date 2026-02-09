@@ -37,15 +37,10 @@
 #include <sstream>
 #include <cstring>
 #include <algorithm>
-#include <sys/utsname.h>
-
-#include <cstring>
 #include <string>
-#include <fstream>
-#include <sstream>
-#include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <sys/utsname.h>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <cpuid.h>

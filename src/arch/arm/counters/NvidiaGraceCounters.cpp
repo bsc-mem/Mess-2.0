@@ -32,8 +32,32 @@
  */
 
 #include "arch/arm/counters/NvidiaGraceCounters.h"
+#include <unistd.h>
 
 CasCounterSelection NvidiaGraceCounters::detectCasCounters() {
+    std::vector<std::string> read_events;
+    std::vector<std::string> write_events;
+    
+    for (int i = 0; i < 16; ++i) {
+        std::string pmu_name = "nvidia_scf_pmu_" + std::to_string(i);
+        std::string pmu_path = "/sys/bus/event_source/devices/" + pmu_name;
+        if (access((pmu_path + "/type").c_str(), F_OK) == 0) {
+            read_events.push_back(pmu_name + "/cmem_rd_data/");
+            write_events.push_back(pmu_name + "/cmem_wr_total_bytes/");
+        } else if (!read_events.empty()) {
+            break;
+        }
+    }
+    
+    if (!read_events.empty() && !write_events.empty()) {
+        CasCounterSelection selection;
+        selection.perf_available = true;
+        selection.read_events = read_events;
+        selection.write_events = write_events;
+        selection.has_read_write = true;
+        return selection;
+    }
+    
     return discoverFromPerf();
 }
 

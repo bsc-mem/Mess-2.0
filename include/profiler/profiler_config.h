@@ -37,7 +37,7 @@
 #include <string>
 #include <vector>
 #include <set>
-#include "architecture/PerformanceCounterStrategy.h"
+#include "architecture/BandwidthCounterStrategy.h"
 
 enum class ProfilerBackend {
     AUTO,
@@ -56,6 +56,7 @@ struct ProfilerConfig {
     bool verbose = false;
     bool show_raw_units = true;
     bool csv_output = true;
+    bool profet_mode = false;
     
     pid_t target_pid = -1;
     
@@ -67,6 +68,7 @@ struct ProfilerConfig {
     int verbosity = 0;
     
     ProfilerBackend backend = ProfilerBackend::AUTO;
+    std::vector<std::string> profet_counters;
     
     double sampling_interval_ms() const;
     bool has_sampling() const { return !sampling_interval_str.empty(); }

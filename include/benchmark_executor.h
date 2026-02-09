@@ -51,8 +51,7 @@
 #include "measurement.h"
 #include "process_manager.h"
 #include "utils/progress_tracker.h"
-
-
+#include "architecture/BandwidthCounterStrategy.h"
 
 class BenchmarkExecutor {
 private:
@@ -74,14 +73,16 @@ private:
     std::unique_ptr<OutlierDetector> outlier_detector_multiseq_;
 
 
-    // Cached TLB hit latency (measured once at startup)
     static double cached_tlb_hit_latency_ns_;
     static bool frequency_written_to_plotter_; 
 
-    // CPU frequency tracking
     double max_cpu_freq_ghz_ = 0.0;
     
     std::unique_ptr<ProgressTracker> progress_tracker_;
+
+    mutable BandwidthCounterSelection cached_bw_counters_;
+    mutable bool bw_counters_discovered_ = false;
+    void discover_bandwidth_counters_if_needed() const;
 
     enum class BenchmarkStatus {
         SUCCESS,
@@ -102,6 +103,9 @@ private:
     
     std::string format_bandwidth_output(const BenchmarkResult& result, const BandwidthCounterSelection& selection) const;
     std::string format_latency_output(const BenchmarkResult& result, pid_t ptrchase_pid) const;
+
+    double get_upi_scaling_factor() const;
+    std::vector<int> resolve_monitored_nodes(int src_cpu) const;
 
 public:
     void force_cleanup();

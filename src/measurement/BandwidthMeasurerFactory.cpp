@@ -35,7 +35,7 @@
 #include "measurement/bw_measurers/PerfBandwidthMeasurer.h"
 #include "measurement/bw_measurers/LikwidBandwidthMeasurer.h"
 #include "measurement/bw_measurers/PcmBandwidthMeasurer.h"
-#include "architecture/PerformanceCounterStrategy.h"
+#include "architecture/BandwidthCounterStrategy.h"
 #include <iostream>
 
 std::unique_ptr<BandwidthMeasurer> create_bandwidth_measurer(
@@ -49,57 +49,62 @@ std::unique_ptr<BandwidthMeasurer> create_bandwidth_measurer(
 
     static bool printed_measurer_type = false;
 
-    bool is_hbm = caps.memory_type.find("HBM") != std::string::npos;
-    
-    bool needs_cross_socket = false;
-    if (!config.memory_bind_nodes.empty()) {
-        int src_cpu = 0;
-        if (!config.traffic_gen_explicit_cores.empty()) {
-            try { src_cpu = std::stoi(config.traffic_gen_explicit_cores[0]); } catch (...) {}
-        }
-        for (int node : config.memory_bind_nodes) {
-            CounterType ct = PerformanceCounterStrategy::detectCounterType(src_cpu, node);
-            if (ct == CounterType::UPI_FLITS) {
-                needs_cross_socket = true;
+    auto& strategy = BandwidthCounterStrategy::instance();
+    MeasurerType measurer_type = strategy.get_resolved_measurer_type();
+
+    std::unique_ptr<BandwidthMeasurer> measurer;
+
+    switch (measurer_type) {
+        case MeasurerType::LIKWID: {
+            if (config.verbosity >= 1 && !printed_measurer_type) {
+                std::cout << "Using Likwid Bandwidth Measurer" << std::endl;
+                printed_measurer_type = true;
+            }
+
+            auto likwid_measurer = std::make_unique<LikwidBandwidthMeasurer>(config, sys_info, caps, storage, traffic_gen_manager, numa_resolver, mode);
+
+            if (likwid_measurer->find_likwid_binary().empty()) {
+                if (strategy.get_requested_measurer_type() == MeasurerType::LIKWID) {
+                    std::cerr << "\n\033[1;31m============================================================\033[0m" << std::endl;
+                    std::cerr << "\033[1;31m ERROR: Bandwidth Measurement Tool (LIKWID) Not Found!\033[0m" << std::endl;
+                    std::cerr << "\033[1;31m------------------------------------------------------------\033[0m" << std::endl;
+                    std::cerr << " Mode: Forced Likwid (--measurer=likwid)" << std::endl;
+                    std::cerr << " Requirement: 'likwid-perfctr' must be in PATH or LIKWID_PERFCTR_PATH." << std::endl;
+                    std::cerr << "\n Aborting execution." << std::endl;
+                    std::cerr << "\033[1;31m============================================================\033[0m\n" << std::endl;
+                    return nullptr;
+                }
+                std::cerr << "Warning: LIKWID backend unavailable; falling back to perf measurer." << std::endl;
+                measurer = std::make_unique<PerfBandwidthMeasurer>(config, sys_info, caps, storage, traffic_gen_manager, numa_resolver, mode);
                 break;
             }
+            measurer = std::move(likwid_measurer);
+            break;
         }
-    }
-    
-    if (is_hbm && needs_cross_socket && !config.force_likwid) {
-        if (config.verbosity >= 1 && !printed_measurer_type) {
-            std::cout << "Using Perf Bandwidth Measurer (HBM with remote/cross-socket access)" << std::endl;
-            printed_measurer_type = true;
-        }
-        return std::make_unique<PerfBandwidthMeasurer>(config, sys_info, storage, traffic_gen_manager, numa_resolver, mode);
-    }
 
-    if (is_hbm || config.force_likwid) {
-        if (config.verbosity >= 1 && !printed_measurer_type) {
-            std::cout << "Using Likwid Bandwidth Measurer" << std::endl;
-            printed_measurer_type = true;
-        }
-        
-        auto measurer = std::make_unique<LikwidBandwidthMeasurer>(config, sys_info, storage, traffic_gen_manager, numa_resolver, mode);
-
-        if (measurer->find_likwid_binary().empty()) {
-            std::cerr << "\n\033[1;31m============================================================\033[0m" << std::endl;
-            std::cerr << "\033[1;31m ERROR: Bandwidth Measurement Tool (LIKWID) Not Found!\033[0m" << std::endl;
-            std::cerr << "\033[1;31m------------------------------------------------------------\033[0m" << std::endl;
-            if (config.force_likwid) {
-                std::cerr << " Mode: Forced Likwid (--likwid)" << std::endl;
-            } else {
-                std::cerr << " Mode: HBM Auto-Detection (" << caps.memory_type << ")" << std::endl;
+        case MeasurerType::PCM: {
+            if (strategy.get_requested_measurer_type() == MeasurerType::PCM) {
+                std::cerr << "ERROR: PCM measurer is still work-in-progress and currently disabled." << std::endl;
+                std::cerr << "       Please use --measurer=perf or --measurer=likwid." << std::endl;
+                return nullptr;
             }
-            std::cerr << " Requirement: 'likwid-perfctr' must be in PATH or LIKWID_PERFCTR_PATH." << std::endl;
-            std::cerr << "\n Aborting execution." << std::endl;
-            std::cerr << "\033[1;31m============================================================\033[0m\n" << std::endl;
-            exit(1);
+            std::cerr << "Warning: PCM measurer is not enabled yet; falling back to perf measurer." << std::endl;
+            measurer = std::make_unique<PerfBandwidthMeasurer>(config, sys_info, caps, storage, traffic_gen_manager, numa_resolver, mode);
+            break;
         }
-        return measurer;
-    } else if (caps.memory_type == "CXL") {
-        return std::make_unique<PcmBandwidthMeasurer>(config, sys_info, storage, traffic_gen_manager, numa_resolver, mode);
-    } else {
-        return std::make_unique<PerfBandwidthMeasurer>(config, sys_info, storage, traffic_gen_manager, numa_resolver, mode);
+
+        case MeasurerType::PERF:
+        default: {
+            if (config.verbosity >= 1 && !printed_measurer_type) {
+                std::cout << "Using Perf Bandwidth Measurer" << std::endl;
+                printed_measurer_type = true;
+            }
+            measurer = std::make_unique<PerfBandwidthMeasurer>(config, sys_info, caps, storage, traffic_gen_manager, numa_resolver, mode);
+            break;
+        }
     }
+
+    measurer->set_counter_selection(strategy.get_selection());
+
+    return measurer;
 }

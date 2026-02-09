@@ -32,10 +32,11 @@
  */
 
 #include "measurement/bw_measurers/LikwidBandwidthMeasurer.h"
-#include "architecture/PerformanceCounterStrategy.h"
+#include "architecture/BandwidthCounterStrategy.h"
 #include "architecture/ArchitectureRegistry.h"
 #include "system_detection.h"
 #include "utils.h"
+#include "measurement/BandwidthStabilizer.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -148,7 +149,7 @@ std::string LikwidBandwidthMeasurer::build_event_string(const std::string& likwi
             eventString << "TXL_FLITS_ALL_DATA:" << channel.writeCounter << ",";
         }
     } else if (memType == "NVIDIA_GRACE" || type == CounterType::NVIDIA_GRACE) {
-        eventString << "nvidia_scf_pmu/cmem_rd_data/,nvidia_scf_pmu/cmem_wr_total_bytes/";
+        eventString << "nvidia_scf_pmu_0/cmem_rd_data/,nvidia_scf_pmu_0/cmem_wr_total_bytes/";
         std::string res = eventString.str();
         event_string_cache_[type] = res;
         return res;
@@ -197,33 +198,15 @@ std::string LikwidBandwidthMeasurer::build_event_string(const std::string& likwi
     return result;
 }
 
-bool LikwidBandwidthMeasurer::sample_bandwidth(long long& cas_rd, long long& cas_wr, double& elapsed, const std::vector<int>& mem_nodes) const {
-    std::string likwidCmd = find_likwid_binary();
-    if (likwidCmd.empty()) {
-        std::cerr << "Error: likwid-perfctr not found." << std::endl;
-        return false;
-    }
-
-    int src_cpu = 0;
-    if (!config_.traffic_gen_explicit_cores.empty()) {
-        try { src_cpu = std::stoi(config_.traffic_gen_explicit_cores[0]); } catch (...) {}
-    }
-    
-    CounterType type = CounterType::CAS_COUNT;
-    for (int node : mem_nodes) {
-        if (PerformanceCounterStrategy::detectCounterType(src_cpu, node) == CounterType::UPI_FLITS) {
-            type = CounterType::UPI_FLITS;
-            break;
-        }
-    }
-    
-    const_cast<LikwidBandwidthMeasurer*>(this)->counter_selection_.type = type;
-
+std::pair<std::string, CounterType> LikwidBandwidthMeasurer::determine_memory_type() const {
     std::string memType = "MBOX";
+    CounterType type = CounterType::CAS_COUNT;
+    
     std::string tech(sys_info_.mem_technology);
     std::string vendor(sys_info_.cpu_vendor);
     std::string model(sys_info_.cpu_model);
     std::string arch(sys_info_.arch);
+    
     if (tech == "HBM" || tech.find("HBM") != std::string::npos) {
         memType = "HBM";
     } else if (vendor.find("AMD") != std::string::npos) {
@@ -234,9 +217,63 @@ bool LikwidBandwidthMeasurer::sample_bandwidth(long long& cas_rd, long long& cas
         if (model_upper.find("NEOVERSE-V2") != std::string::npos || model_upper.find("NEOVERSE V2") != std::string::npos) {
             memType = "NVIDIA_GRACE";
             type = CounterType::NVIDIA_GRACE;
-            const_cast<LikwidBandwidthMeasurer*>(this)->counter_selection_.type = type;
         }
     }
+    
+    return {memType, type};
+}
+
+void LikwidBandwidthMeasurer::parse_likwid_header(const std::string& line, CounterType type,
+                                                   std::vector<int>& rdIndices, std::vector<int>& wrIndices) const {
+    rdIndices.clear();
+    wrIndices.clear();
+    
+    std::stringstream ss(line);
+    std::string token;
+    int colIndex = 0;
+    
+    while (std::getline(ss, token, '|')) {
+        if (type == CounterType::UPI_FLITS) {
+            if (token.find("RXL_FLITS_ALL_DATA") != std::string::npos) {
+                rdIndices.push_back(colIndex);
+            } else if (token.find("TXL_FLITS_ALL_DATA") != std::string::npos) {
+                wrIndices.push_back(colIndex);
+            }
+        } else if (type == CounterType::NVIDIA_GRACE) {
+            std::string token_lower = token;
+            std::transform(token_lower.begin(), token_lower.end(), token_lower.begin(), ::tolower);
+            if (token_lower.find("cmem_rd_data") != std::string::npos || 
+                token_lower.find("cmem_rd_bytes") != std::string::npos ||
+                token_lower.find("rd_data") != std::string::npos) {
+                rdIndices.push_back(colIndex);
+            } else if (token_lower.find("cmem_wr_data") != std::string::npos ||
+                       token_lower.find("cmem_wr_total_bytes") != std::string::npos ||
+                       token_lower.find("cmem_wr_bytes") != std::string::npos ||
+                       token_lower.find("wr_total_bytes") != std::string::npos) {
+                wrIndices.push_back(colIndex);
+            }
+        } else {
+            if (token.find("CAS_COUNT_RD") != std::string::npos) {
+                rdIndices.push_back(colIndex);
+            } else if (token.find("CAS_COUNT_WR") != std::string::npos) {
+                wrIndices.push_back(colIndex);
+            } else if (token.find("DATA_FROM_LOCAL_DRAM") != std::string::npos) {
+                rdIndices.push_back(colIndex);
+            }
+        }
+        colIndex++;
+    }
+}
+
+bool LikwidBandwidthMeasurer::sample_bandwidth(long long& cas_rd, long long& cas_wr, double& elapsed, const std::vector<int>& /*mem_nodes*/) const {
+    std::string likwidCmd = find_likwid_binary();
+    if (likwidCmd.empty()) {
+        std::cerr << "Error: likwid-perfctr not found." << std::endl;
+        return false;
+    }
+
+    CounterType type = counter_selection_.type;
+    auto [memType, baseType] = determine_memory_type();
 
     std::string eventString = build_event_string(likwidCmd, memType, type);
     if (eventString.empty()) {
@@ -269,39 +306,7 @@ bool LikwidBandwidthMeasurer::sample_bandwidth(long long& cas_rd, long long& cas
 
     for (const auto& line : lines) {
         if (line.find("# GID|") != std::string::npos) {
-            std::stringstream ss(line);
-            std::string token;
-            int colIndex = 0;
-            while (std::getline(ss, token, '|')) {
-                if (type == CounterType::UPI_FLITS) {
-                    if (token.find("RXL_FLITS_ALL_DATA") != std::string::npos) {
-                        rdIndices.push_back(colIndex);
-                    } else if (token.find("TXL_FLITS_ALL_DATA") != std::string::npos) {
-                        wrIndices.push_back(colIndex);
-                    }
-                } else if (type == CounterType::NVIDIA_GRACE) {
-                    std::string token_lower = token;
-                    std::transform(token_lower.begin(), token_lower.end(), token_lower.begin(), ::tolower);
-                    if (token_lower.find("cmem_rd_data") != std::string::npos || 
-                        token_lower.find("cmem_rd_bytes") != std::string::npos ||
-                        token_lower.find("rd_data") != std::string::npos) {
-                        rdIndices.push_back(colIndex);
-                    } else if (token_lower.find("cmem_wr_total_bytes") != std::string::npos ||
-                               token_lower.find("cmem_wr_bytes") != std::string::npos ||
-                               token_lower.find("wr_total_bytes") != std::string::npos) {
-                        wrIndices.push_back(colIndex);
-                    }
-                } else {
-                    if (token.find("CAS_COUNT_RD") != std::string::npos) {
-                        rdIndices.push_back(colIndex);
-                    } else if (token.find("CAS_COUNT_WR") != std::string::npos) {
-                        wrIndices.push_back(colIndex);
-                    } else if (token.find("DATA_FROM_LOCAL_DRAM") != std::string::npos) {
-                        rdIndices.push_back(colIndex);
-                    }
-                }
-                colIndex++;
-            }
+            parse_likwid_header(line, type, rdIndices, wrIndices);
             headerParsed = true;
         } else if (headerParsed && !line.empty() && std::isdigit(line[0])) {
             std::stringstream ss(line);
@@ -331,47 +336,15 @@ bool LikwidBandwidthMeasurer::sample_bandwidth(long long& cas_rd, long long& cas
     return false;
 }
 
-#include "measurement/BandwidthStabilizer.h"
-
-
 bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long& last_cas_rd, long long& last_cas_wr, double& last_elapsed, int pause, int ratio, bool fast_resume, std::function<void()> on_sample) {
     std::string likwidCmd = find_likwid_binary();
     if (likwidCmd.empty()) return false;
 
-    int src_cpu = 0;
-    if (!config_.traffic_gen_explicit_cores.empty()) {
-        try { src_cpu = std::stoi(config_.traffic_gen_explicit_cores[0]); } catch (...) {}
-    }
-    
     std::vector<int> mem_nodes = numa_resolver_ ? numa_resolver_() : std::vector<int>{0};
-    CounterType type = CounterType::CAS_COUNT;
-    for (int node : mem_nodes) {
-        if (PerformanceCounterStrategy::detectCounterType(src_cpu, node) == CounterType::UPI_FLITS) {
-            type = CounterType::UPI_FLITS;
-            break;
-        }
-    }
-    
-    const_cast<LikwidBandwidthMeasurer*>(this)->counter_selection_.type = type;
 
-    std::string memType = "MBOX";
-    std::string tech(sys_info_.mem_technology);
-    std::string vendor(sys_info_.cpu_vendor);
-    std::string model2(sys_info_.cpu_model);
-    std::string arch2(sys_info_.arch);
-    if (tech == "HBM" || tech.find("HBM") != std::string::npos) {
-        memType = "HBM";
-    } else if (vendor.find("AMD") != std::string::npos) {
-        memType = "AMD_DF";
-    } else if (arch2.find("aarch64") != std::string::npos || arch2.find("arm64") != std::string::npos) {
-        std::string model_upper2 = model2;
-        std::transform(model_upper2.begin(), model_upper2.end(), model_upper2.begin(), ::toupper);
-        if (model_upper2.find("NEOVERSE-V2") != std::string::npos || model_upper2.find("NEOVERSE V2") != std::string::npos) {
-            memType = "NVIDIA_GRACE";
-            type = CounterType::NVIDIA_GRACE;
-            const_cast<LikwidBandwidthMeasurer*>(this)->counter_selection_.type = type;
-        }
-    }
+    CounterType type = counter_selection_.type;
+    auto [memType, baseType] = determine_memory_type();
+
     std::string eventString = build_event_string(likwidCmd, memType, type);
     if (eventString.empty()) return false;
 
@@ -380,11 +353,11 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
 
     int relaunch_attempts = 0;
     auto relaunch_current_traffic_gen = [&]() -> bool {
-        int traffic_gen_cores = sys_info_.sockets[0].core_count - 1;
-        if (config_.traffic_gen_cores > 0 && config_.traffic_gen_cores <= sys_info_.sockets[0].core_count - 1) {
-            traffic_gen_cores = config_.traffic_gen_cores;
+        if (!this->relaunch_traffic_gen(ratio, pause, get_traffic_gen_cores())) {
+            return false;
         }
-        return this->relaunch_traffic_gen(ratio, pause, traffic_gen_cores);
+        traffic_gen_manager_->wait_for_traffic_gen_ready(120);
+        return true;
     };
 
     if (!traffic_gen_manager_->is_traffic_gen_running(traffic_gen_manager_->active_traffic_gen_pid())) {
@@ -393,6 +366,37 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
         relaunch_attempts++;
     }
 
+    bool is_remote = (type == CounterType::UPI_FLITS);
+    int expected_cores = get_traffic_gen_cores();
+    int socket_cores = (sys_info_.socket_count > 0) ? sys_info_.sockets[0].core_count : 0;
+    
+    double theoretical_peak_gb_s = TheoreticalPeakCalculator::calculate_achievable_peak(
+        caps_, expected_cores, socket_cores, is_remote);
+    if (theoretical_peak_gb_s <= 0) theoretical_peak_gb_s = 300.0;
+    TrafficGenHealthChecker health_checker;
+    health_checker.is_pid_alive = [this](int pid) -> bool {
+        return traffic_gen_manager_->is_traffic_gen_running(pid);
+    };
+    health_checker.count_running_instances = []() -> int {
+        return TrafficGenHealthChecker::count_taskset_traffic_gen();
+    };
+    health_checker.expected_instance_count = expected_cores;
+
+    ensure_scaling_factor_cached();
+    int cache_line_size = cached_cache_line_size_;
+    double scaling_factor = cached_scaling_factor_;
+
+    auto calculate_bw_gb_s = [&](long long cas_rd, long long cas_wr, double elapsed_s) -> double {
+        if (elapsed_s <= 0) return 0.0;
+        if (type == CounterType::NVIDIA_GRACE) {
+            double bytes_rd = static_cast<double>(cas_rd) * 32.0;
+            double bytes_wr = static_cast<double>(cas_wr);
+            return (bytes_rd + bytes_wr) / (elapsed_s * 1e9);
+        } else {
+            return static_cast<double>(cas_rd + cas_wr) * cache_line_size * scaling_factor / (elapsed_s * 1e9);
+        }
+    };
+
     FILE* pipe = popen(cmd.c_str(), "r");
     if (!pipe) return false;
 
@@ -400,7 +404,9 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
     int pipe_fd = fileno(pipe);
 
     size_t window_size = fast_resume ? 5 : (type == CounterType::UPI_FLITS ? 10 : 7);
-    BandwidthStabilizer stabilizer(window_size);
+    BandwidthStabilizer stabilizer(
+        theoretical_peak_gb_s, pause, health_checker,
+        window_size, 0.05, config_.verbosity);
     
     int total_samples = 0;
     int max_samples = static_cast<int>(200 * sampling_interval_ms_);
@@ -422,13 +428,13 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
             std::chrono::steady_clock::now() - loop_start).count();
         
         if (elapsed_total > OVERALL_TIMEOUT_SECONDS) {
-            std::cerr << "\n    ERROR: Likwid stabilization timed out after " << OVERALL_TIMEOUT_SECONDS << " seconds." << std::endl;
+            std::cerr << "\n    ERROR: Likwid stabilization timed out after " << OVERALL_TIMEOUT_SECONDS << " seconds." << '\n';
             if (config_.verbosity >= 3) {
                 std::cerr << "    Possible causes:\n"
                           << "      - likwid-perfctr hung\n"
                           << "      - Performance counters unavailable\n"
                           << "      - System overloaded\n"
-                          << "    Command: " << cmd << std::endl;
+                          << "    Command: " << cmd << '\n';
             }
             pclose(pipe); 
             traffic_gen_manager_->kill_all_traffic_gen();
@@ -446,7 +452,7 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
         int ready = select(pipe_fd + 1, &read_fds, NULL, NULL, &timeout);
         
         if (ready < 0) {
-            std::cerr << "    ERROR: select() failed on likwid pipe" << std::endl;
+            std::cerr << "    ERROR: select() failed on likwid pipe" << '\n';
             pclose(pipe);
             return false;
         }
@@ -455,16 +461,16 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
             consecutive_timeouts++;
             if (config_.verbosity >= 2) {
                 std::cout << "    Warning: No likwid output for " << READ_TIMEOUT_SECONDS << " seconds (attempt " 
-                          << consecutive_timeouts << "/3)" << std::endl;
+                          << consecutive_timeouts << "/3)" << '\n';
             }
             
             if (consecutive_timeouts >= 3) {
-                std::cerr << "\n    ERROR: Likwid not producing output." << std::endl;
+                std::cerr << "\n    ERROR: Likwid not producing output." << '\n';
                 if (config_.verbosity >= 3) {
                     std::cerr << "    Possible causes:\n"
                               << "      - likwid-perfctr requires root/setuid\n"
                               << "      - Counters not available for this architecture\n"
-                              << "    Command: " << cmd << std::endl;
+                              << "    Command: " << cmd << '\n';
                 }
                 pclose(pipe);
                 traffic_gen_manager_->kill_all_traffic_gen();
@@ -483,41 +489,7 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
         if (line.empty()) continue;
 
         if (line.find("# GID|") != std::string::npos) {
-            std::stringstream ss(line);
-            std::string token;
-            int colIndex = 0;
-            rdIndices.clear();
-            wrIndices.clear();
-            while (std::getline(ss, token, '|')) {
-                if (type == CounterType::UPI_FLITS) {
-                    if (token.find("RXL_FLITS_ALL_DATA") != std::string::npos) {
-                        rdIndices.push_back(colIndex);
-                    } else if (token.find("TXL_FLITS_ALL_DATA") != std::string::npos) {
-                        wrIndices.push_back(colIndex);
-                    }
-                } else if (type == CounterType::NVIDIA_GRACE) {
-                    std::string token_lower = token;
-                    std::transform(token_lower.begin(), token_lower.end(), token_lower.begin(), ::tolower);
-                    if (token_lower.find("cmem_rd_data") != std::string::npos || 
-                        token_lower.find("cmem_rd_bytes") != std::string::npos ||
-                        token_lower.find("rd_data") != std::string::npos) {
-                        rdIndices.push_back(colIndex);
-                    } else if (token_lower.find("cmem_wr_total_bytes") != std::string::npos ||
-                               token_lower.find("cmem_wr_bytes") != std::string::npos ||
-                               token_lower.find("wr_total_bytes") != std::string::npos) {
-                        wrIndices.push_back(colIndex);
-                    }
-                } else {
-                    if (token.find("CAS_COUNT_RD") != std::string::npos) {
-                        rdIndices.push_back(colIndex);
-                    } else if (token.find("CAS_COUNT_WR") != std::string::npos) {
-                        wrIndices.push_back(colIndex);
-                    } else if (token.find("DATA_FROM_LOCAL_DRAM") != std::string::npos) {
-                        rdIndices.push_back(colIndex);
-                    }
-                }
-                colIndex++;
-            }
+            parse_likwid_header(line, type, rdIndices, wrIndices);
             headerParsed = true;
             continue;
         }
@@ -542,7 +514,7 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
 
             if (sample_cas_rd > 1e15 || sample_cas_wr > 1e15) {
                 if (config_.verbosity >= 3) {
-                    std::cout << "      [Sample Ignored] Garbage values detected: RD=" << sample_cas_rd << ", WR=" << sample_cas_wr << std::endl;
+                    std::cout << "      [Sample Ignored] Garbage values detected: RD=" << sample_cas_rd << ", WR=" << sample_cas_wr << '\n';
                 }
                 continue;
             }
@@ -570,16 +542,38 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
                 return false;
             }
 
-            stabilizer.add_sample(sample_cas_rd, sample_cas_wr);
+            double sample_elapsed = sampling_interval_ms_ / 1000.0;
+            double bw_gb_s = calculate_bw_gb_s(sample_cas_rd, sample_cas_wr, sample_elapsed);
+            StabilizationResult result = stabilizer.add_sample(sample_cas_rd, sample_cas_wr, bw_gb_s);
+
+            if (result == StabilizationResult::ZOMBIE_DETECTED) {
+                if (config_.verbosity >= 2) {
+                    std::cout << "    [ZOMBIE] TrafficGen died, aborting stabilization" << '\n';
+                }
+                pclose_success(pipe);
+                samples_taken = total_samples;
+                return false;
+            }
 
             if (config_.verbosity >= 3) {
                     double read_ratio = 0.0;
                     long long total_cas = sample_cas_rd + sample_cas_wr;
-                    if (total_cas > 0) {
-                        read_ratio = static_cast<double>(sample_cas_rd) / static_cast<double>(total_cas);
+                    if (type == CounterType::NVIDIA_GRACE) {
+                        double read_bytes = static_cast<double>(sample_cas_rd) * 32.0;
+                        double write_bytes = static_cast<double>(sample_cas_wr);
+                        double total_bytes = read_bytes + write_bytes;
+                        if (total_bytes > 0) {
+                            read_ratio = read_bytes / total_bytes;
+                        }
+                    } else {
+                        if (total_cas > 0) {
+                            read_ratio = static_cast<double>(sample_cas_rd) / static_cast<double>(total_cas);
+                        }
                     }
-                    std::cout << "      [Sample " << total_samples << "] LIKWID " << (type == CounterType::UPI_FLITS ? "UPI FLITS" : "CAS") << ": " << total_cas;
-                    stabilizer.print_status(read_ratio);
+                    bool has_distinct_rw = counter_selection_.cas.has_read_write;
+                    std::cout << "      [Sample " << total_samples << "] LIKWID " << (type == CounterType::UPI_FLITS ? "UPI FLITS" : "CAS") << ": " << total_cas
+                              << " (RD: " << sample_cas_rd << ", WR: " << sample_cas_wr << ")";
+                    stabilizer.print_status(read_ratio, -1.0, has_distinct_rw);
             }
 
             if (stabilizer.is_stable()) {
@@ -601,13 +595,13 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
         }
         
         if (type == CounterType::UPI_FLITS && (aggregate_cas_rd + aggregate_cas_wr) == 0) {
-            std::cerr << "\n\033[1;31mERROR: Zero bandwidth detected on UPI counters!\033[0m" << std::endl;
-            std::cerr << "       The selected UPI counters are reporting 0 traffic." << std::endl;
-            std::cerr << "       This usually means either:" << std::endl;
-            std::cerr << "       1. The machine does not support these specific UPI counters." << std::endl;
-            std::cerr << "       2. Traffic is not flowing through the monitored UPI links." << std::endl;
-            std::cerr << "       3. Likwid is not configured correctly for this architecture." << std::endl;
-            std::cerr << "       Aborting benchmark to prevent invalid results." << std::endl;
+            std::cerr << "\n\033[1;31mERROR: Zero bandwidth detected on UPI counters!\033[0m" << '\n';
+            std::cerr << "       The selected UPI counters are reporting 0 traffic." << '\n';
+            std::cerr << "       This usually means either:" << '\n';
+            std::cerr << "       1. The machine does not support these specific UPI counters." << '\n';
+            std::cerr << "       2. Traffic is not flowing through the monitored UPI links." << '\n';
+            std::cerr << "       3. Likwid is not configured correctly for this architecture." << '\n';
+            std::cerr << "       Aborting benchmark to prevent invalid results." << '\n';
             pclose_success(pipe);
             return false;
         }
@@ -625,7 +619,7 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
 }
 
 bool LikwidBandwidthMeasurer::monitor_command(const std::string& command, 
-                                              std::function<void(double timestamp, double bw_gbps, long long raw_rd, long long raw_wr)> callback, 
+                                              MonitorCallback callback,
                                               bool summary_mode) {
     std::string likwidCmd = find_likwid_binary();
     if (likwidCmd.empty()) {
@@ -635,35 +629,8 @@ bool LikwidBandwidthMeasurer::monitor_command(const std::string& command,
 
     std::vector<int> mem_nodes = numa_resolver_ ? numa_resolver_() : std::vector<int>{0};
 
-    int src_cpu = 0;
-    CounterType type = CounterType::CAS_COUNT;
-    for (int node : mem_nodes) {
-        if (PerformanceCounterStrategy::detectCounterType(src_cpu, node) == CounterType::UPI_FLITS) {
-            type = CounterType::UPI_FLITS;
-            break;
-        }
-    }
-    
-    const_cast<LikwidBandwidthMeasurer*>(this)->counter_selection_.type = type;
-
-    std::string memType = "MBOX";
-    std::string tech(sys_info_.mem_technology);
-    std::string vendor(sys_info_.cpu_vendor);
-    std::string model3(sys_info_.cpu_model);
-    std::string arch3(sys_info_.arch);
-    if (tech == "HBM" || tech.find("HBM") != std::string::npos) {
-        memType = "HBM";
-    } else if (vendor.find("AMD") != std::string::npos) {
-        memType = "AMD_DF";
-    } else if (arch3.find("aarch64") != std::string::npos || arch3.find("arm64") != std::string::npos) {
-        std::string model_upper3 = model3;
-        std::transform(model_upper3.begin(), model_upper3.end(), model_upper3.begin(), ::toupper);
-        if (model_upper3.find("NEOVERSE-V2") != std::string::npos || model_upper3.find("NEOVERSE V2") != std::string::npos) {
-            memType = "NVIDIA_GRACE";
-            type = CounterType::NVIDIA_GRACE;
-            const_cast<LikwidBandwidthMeasurer*>(this)->counter_selection_.type = type;
-        }
-    }
+    CounterType type = counter_selection_.type;
+    auto [memType, baseType] = determine_memory_type();
 
     std::string eventString = build_event_string(likwidCmd, memType, type);
     if (eventString.empty()) {
@@ -692,30 +659,14 @@ bool LikwidBandwidthMeasurer::monitor_command(const std::string& command,
     long long total_wr = 0;
     double max_timestamp = 0.0;
 
-    int cache_line_size = 64;
-    if (sys_info_.sockets[0].cache_count > 0) {
-        cache_line_size = sys_info_.sockets[0].caches[0].line_size_bytes;
-    }
-
-    double scaling_factor = 1.0;
-    if (type == CounterType::UPI_FLITS) {
-        SystemDetector detector;
-        detector.detect();
-        auto caps = detector.get_capabilities();
-        auto arch = ArchitectureRegistry::instance().getArchitecture(caps);
-        if (arch) {
-            scaling_factor = arch->getUpiScalingFactor(caps);
-        } else {
-            scaling_factor = 1.0 / 9.0;
-        }
-    }
+    ensure_scaling_factor_cached();
 
     auto process_sample = [&](double timestamp, long long rd, long long wr) {
         double duration_s = interval_ms / 1000.0;
-        double bw = (rd + wr) * cache_line_size * scaling_factor / (duration_s * 1e9);
-        
+        double bw = calculate_bandwidth_gbps(rd, wr, duration_s, type, cached_cache_line_size_, cached_scaling_factor_);
+        static const MonitorSampleExtras kEmptyExtras;
         if (callback) {
-            callback(timestamp, bw, rd, wr);
+            callback(timestamp, bw, rd, wr, kEmptyExtras);
         }
     };
 
@@ -726,41 +677,7 @@ bool LikwidBandwidthMeasurer::monitor_command(const std::string& command,
         if (line.empty()) continue;
 
         if (line.find("# GID|") != std::string::npos) {
-            std::stringstream ss(line);
-            std::string token;
-            int colIndex = 0;
-            rdIndices.clear();
-            wrIndices.clear();
-            while (std::getline(ss, token, '|')) {
-                if (type == CounterType::UPI_FLITS) {
-                    if (token.find("RXL_FLITS_ALL_DATA") != std::string::npos) {
-                        rdIndices.push_back(colIndex);
-                    } else if (token.find("TXL_FLITS_ALL_DATA") != std::string::npos) {
-                        wrIndices.push_back(colIndex);
-                    }
-                } else if (type == CounterType::NVIDIA_GRACE) {
-                    std::string token_lower = token;
-                    std::transform(token_lower.begin(), token_lower.end(), token_lower.begin(), ::tolower);
-                    if (token_lower.find("cmem_rd_data") != std::string::npos || 
-                        token_lower.find("cmem_rd_bytes") != std::string::npos ||
-                        token_lower.find("rd_data") != std::string::npos) {
-                        rdIndices.push_back(colIndex);
-                    } else if (token_lower.find("cmem_wr_total_bytes") != std::string::npos ||
-                               token_lower.find("cmem_wr_bytes") != std::string::npos ||
-                               token_lower.find("wr_total_bytes") != std::string::npos) {
-                        wrIndices.push_back(colIndex);
-                    }
-                } else {
-                    if (token.find("CAS_COUNT_RD") != std::string::npos) {
-                        rdIndices.push_back(colIndex);
-                    } else if (token.find("CAS_COUNT_WR") != std::string::npos) {
-                        wrIndices.push_back(colIndex);
-                    } else if (token.find("DATA_FROM_LOCAL_DRAM") != std::string::npos) {
-                        rdIndices.push_back(colIndex);
-                    }
-                }
-                colIndex++;
-            }
+            parse_likwid_header(line, type, rdIndices, wrIndices);
             headerParsed = true;
             continue;
         }
@@ -804,10 +721,10 @@ bool LikwidBandwidthMeasurer::monitor_command(const std::string& command,
         
         double duration = (max_timestamp > 0) ? max_timestamp : elapsed_seconds;
         
-        double bw = (total_rd + total_wr) * cache_line_size * scaling_factor / (duration * 1e9);
-        
+        double bw = calculate_bandwidth_gbps(total_rd, total_wr, duration, type, cached_cache_line_size_, cached_scaling_factor_);
+        static const MonitorSampleExtras kEmptyExtras;
         if (callback) {
-            callback(duration, bw, total_rd, total_wr);
+            callback(duration, bw, total_rd, total_wr, kEmptyExtras);
         }
     }
 

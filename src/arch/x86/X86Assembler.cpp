@@ -33,18 +33,32 @@
 
 #include "arch/x86/X86Assembler.h"
 
+static const char* getScalarRegName(int reg) {
+    static const char* regs[] = {"rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r13", "r14"};
+    return regs[reg % 9];
+}
+
 std::string X86Assembler::generateLoad(int offset, int reg) const {
     std::ostringstream oss;
-    bool avx512 = (config_.isa_mode == ISAMode::AVX512);
-    oss << "        \"vmovupd   " << offset << "(%r11,%rbx,8), %" << (avx512 ? "zmm" : "ymm") << reg << ";\\n\"\n";
+    if (config_.isa_mode == ISAMode::SCALAR) {
+        oss << "        \"movq      " << offset << "(%%r11,%%rbx,8), %%" << getScalarRegName(reg) << ";\\n\"\n";
+    } else {
+        bool avx512 = (config_.isa_mode == ISAMode::AVX512);
+        oss << "        \"vmovupd   " << offset << "(%%r11,%%rbx,8), %%" << (avx512 ? "zmm" : "ymm") << reg << ";\\n\"\n";
+    }
     return oss.str();
 }
 
-std::string X86Assembler::generateStore(int offset, int /*reg*/) const {
+std::string X86Assembler::generateStore(int offset, int reg) const {
     std::ostringstream oss;
-    const char* instr = config_.use_nontemporal_stores ? "vmovntpd" : "vmovupd";
-    bool avx512 = (config_.isa_mode == ISAMode::AVX512);
-    oss << "        \"" << instr << "  %" << (avx512 ? "zmm" : "ymm") << "1, " << offset << "(%r10,%rbx,8);\\n\"\n";
+    if (config_.isa_mode == ISAMode::SCALAR) {
+        const char* instr = config_.use_nontemporal_stores ? "movnti" : "movq";
+        oss << "        \"" << instr << "    %%" << getScalarRegName(reg) << ", " << offset << "(%%r10,%%rbx,8);\\n\"\n";
+    } else {
+        const char* instr = config_.use_nontemporal_stores ? "vmovntpd" : "vmovupd";
+        bool avx512 = (config_.isa_mode == ISAMode::AVX512);
+        oss << "        \"" << instr << "  %%" << (avx512 ? "zmm" : "ymm") << "1, " << offset << "(%%r10,%%rbx,8);\\n\"\n";
+    }
     return oss.str();
 }
 
@@ -52,16 +66,16 @@ std::string X86Assembler::generateLoopControl(int increment, int labelId) const 
     std::ostringstream oss;
     oss << "\n        \"//-----------------------------------------------\\n\"\n"
         << "\n"
-        << "        \"add       $" << (increment / 8) << ", %rbx;\\n\"\n"
+        << "        \"add       $" << (increment / 8) << ", %%rbx;\\n\"\n"
         << "\n"
-        << "        \"cmp       %r12, %rbx;\\n\"\n"
+        << "        \"cmp       %%r12, %%rbx;\\n\"\n"
         << "\n"
         << "        \"jb        ..L_" << labelId << ";\\n\"\n";
     return oss.str();
 }
 
 std::string X86Assembler::generatePause() const {
-    return "        \"movq      %r15, %rdi;\\n\"\n"
+    return "        \"movq      %%r15, %%rdi;\\n\"\n"
            "\n"
            "        \"call      nop;\\n\"\n"
            "\n";
@@ -101,8 +115,11 @@ std::string X86Assembler::generateRegisterSetup() const {
 }
 
 std::string X86Assembler::generateVectorRegisterInit() const {
+    if (config_.isa_mode == ISAMode::SCALAR) {
+        return "";
+    }
     bool avx512 = (config_.isa_mode == ISAMode::AVX512);
-    return std::string("        \"") + (avx512 ? "vpxorq %zmm1, %zmm1, %zmm1" : "vxorpd %ymm1, %ymm1, %ymm1") + ";\\n\"\n\n";
+    return std::string("        \"") + (avx512 ? "vpxorq %%zmm1, %%zmm1, %%zmm1" : "vxorpd %%ymm1, %%ymm1, %%ymm1") + ";\\n\"\n\n";
 }
 
 std::string X86Assembler::generateFooter() const {
@@ -110,11 +127,14 @@ std::string X86Assembler::generateFooter() const {
 }
 
 std::string X86Assembler::generateAsmStart() const {
-    return "    asm (\n";
+    return "    asm volatile (\n";
 }
 
 std::string X86Assembler::generateAsmEnd() const {
-    return "\n    );\n";
+    return "      :\n"
+           "      : \"r\" (a), \"r\" (b), \"r\" (i), \"r\" (n), \"r\" (p)\n"
+           "      : \"rdi\", \"memory\", \"cc\"\n"
+           "    );\n";
 }
 
 std::string X86Assembler::getPointerChaseLoopAsm() const {
@@ -129,14 +149,45 @@ std::string X86Assembler::getPointerChaseInstruction() const {
 std::string X86Assembler::generatePointerChaseBurstLoop() const {
     return R"(
         __asm__ __volatile__ (
-            "start_loop_%=:"
+            "start_loop_%=:\n"
             #include "loop.h"
-            "dec %%rcx;"
-            "jnz start_loop_%=;"
+            "dec %%rcx;\n"
+            "jnz start_loop_%=;\n"
             : "+a" (current_offset), "=c" (dummy_rcx)
             : "b" (array), "c" (BURST_ITERS)
             : "cc", "memory"
         );
+)";
+}
+
+std::string X86Assembler::generateNopFile() const {
+    return R"(#include <stdlib.h>
+#include <stdio.h>
+
+int nop(int *ntimes) {
+	unsigned int i  = *ntimes;
+        if ( !i ) {
+            return 0;
+        } else {
+            asm(
+                "mov %0, %%ecx;\n"
+                "the_loop%=:\n"
+                "nop;\n"
+                "dec %%ecx;\n"
+                "jnz the_loop%=;\n"
+                :
+                : "r" (i)
+                :"ecx"
+            );
+        }
+
+	return 0;
+}
+
+int nop_(int *ntimes)
+{
+    return nop(ntimes);
+}
 )";
 }
 

@@ -34,9 +34,9 @@
 #ifndef RISCV_COUNTERS_H
 #define RISCV_COUNTERS_H
 
-#include "architecture/PerformanceCounterStrategy.h"
+#include "architecture/BandwidthCounterStrategy.h"
 
-class RiscvCounters : public PerformanceCounterStrategy {
+class RiscvCounters : public BandwidthCounterStrategy {
 public:
     CasCounterSelection detectCasCounters() override;
     void getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) override;

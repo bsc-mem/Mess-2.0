@@ -44,20 +44,74 @@
 #include <cmath>
 #include <cstring>
 #include <cerrno>
+#include <algorithm>
+#include <stdexcept>
 #include "utils.h"
+
+namespace {
+
+ISAExtension isaExtensionFromMode(ISAMode mode) {
+    switch (mode) {
+        // x86_64
+        case ISAMode::AVX512: return ISAExtension::AVX512;
+        case ISAMode::AVX2:   return ISAExtension::AVX2;
+        case ISAMode::AVX:    return ISAExtension::AVX;
+        // ARM64
+        case ISAMode::SVE:    return ISAExtension::SVE;
+        case ISAMode::NEON:   return ISAExtension::NEON;
+        // RISC-V
+        case ISAMode::RVV1_0: return ISAExtension::RVV1_0;
+        case ISAMode::RVV0_7: return ISAExtension::RVV0_7;
+        // POWER
+        case ISAMode::VSX:    return ISAExtension::VSX;
+        case ISAMode::VMX:    return ISAExtension::VMX;
+        default:
+            return ISAExtension::UNKNOWN;
+    }
+}
+
+bool isISAAvailable(ISAMode mode, const CPUCapabilities& caps) {
+    if (mode == ISAMode::AUTO || mode == ISAMode::SCALAR) {
+        return true;
+    }
+
+    ISAExtension required = isaExtensionFromMode(mode);
+    if (required == ISAExtension::UNKNOWN) {
+        return false;
+    }
+    return std::find(caps.extensions.begin(), caps.extensions.end(), required) != caps.extensions.end();
+}
+
+}
 
 KernelGenerator::KernelGenerator(const KernelConfig& config, const CPUCapabilities& capabilities)
     : kernel_config_(config), capabilities_(capabilities) {
-    
+
     architecture_ = ArchitectureRegistry::instance().getArchitecture(capabilities_);
     if (!architecture_) {
-        std::cerr << "Error: Unsupported architecture!" << std::endl;
-        exit(1);
+        throw std::runtime_error("Unsupported architecture");
     }
 
     if (kernel_config_.isa_mode == ISAMode::AUTO) {
         auto best_isa = architecture_->selectBestISA(capabilities_);
         kernel_config_.isa_mode = best_isa->getMode();
+    } else {
+        if (!isISAAvailable(kernel_config_.isa_mode, capabilities_)) {
+            std::string requested_name = "Unknown";
+            for (const auto& isa : architecture_->getSupportedISAs()) {
+                if (isa->getMode() == kernel_config_.isa_mode) {
+                    requested_name = isa->getName();
+                    break;
+                }
+            }
+
+            auto fallback_isa = architecture_->selectBestISA(capabilities_);
+            std::cerr << "│ \033[33mWarning: Requested ISA '" << requested_name
+                      << "' is not available on this system.\033[0m" << std::endl;
+            std::cerr << "│ \033[33mFalling back to '" << fallback_isa->getName() << "'.\033[0m" << std::endl;
+
+            kernel_config_.isa_mode = fallback_isa->getMode();
+        }
     }
 
     assembler_ = architecture_->createAssembler(kernel_config_);
@@ -335,6 +389,7 @@ std::string KernelGenerator::generate_all_multiseq_functions() {
     oss << "    switch (rd_percentage) {\n";
     for (int ratio = 0; ratio <= 100; ratio += kernel_config_.ratio_granularity) {
         oss << "        case " << ratio << ": TrafficGen_copy_" << ratio << "(a_array, b_array, array_size, pause); break;\n";
+        
     }
     oss << "        default: break;\n";
     oss << "    }\n";
@@ -373,7 +428,7 @@ void KernelGenerator::generate_kernel(const std::string& output_dir_str) {
     
     std::ofstream nop_file(nop_filename);
     if (nop_file.is_open()) {
-        nop_file << architecture_->generateNopFile();
+        nop_file << assembler_->generateNopFile();
         nop_file.close();
     } else {
         std::cerr << "│ ERROR: Failed to create " << nop_filename << ": " << strerror(errno) << std::endl;
@@ -383,7 +438,6 @@ void KernelGenerator::generate_kernel(const std::string& output_dir_str) {
 
 
 std::string KernelGenerator::generate_nop_file() {
-    return architecture_->generateNopFile();
+    return assembler_->generateNopFile();
 }
-
 

@@ -100,6 +100,7 @@ class BandwidthMeasurer {
 public:
     BandwidthMeasurer(const BenchmarkConfig& config,
                       const system_info& sys_info,
+                      const CPUCapabilities& caps,
                       MeasurementStorage* storage,
                       TrafficGenProcessManager* traffic_gen_manager,
                       std::function<std::vector<int>()> numa_resolver,
@@ -126,6 +127,8 @@ public:
 
     void set_counter_selection(const BandwidthCounterSelection& selection) {
         counter_selection_ = selection;
+        scaling_factor_initialized_ = false;
+        cached_scaling_factor_ = 1.0;
     }
 
     const BandwidthCounterSelection& get_counter_selection() const {
@@ -140,22 +143,39 @@ public:
         extra_perf_values_.clear();
     }
 
+    static double calculate_bandwidth_gbps(long long cas_rd, long long cas_wr, double elapsed_s,
+                                           CounterType type, int cache_line_size, double scaling_factor);
+
 protected:
     const BenchmarkConfig& config_;
     const system_info& sys_info_;
+    const CPUCapabilities& caps_;
     MeasurementStorage* storage_;
     TrafficGenProcessManager* traffic_gen_manager_;
     std::function<std::vector<int>()> numa_resolver_;
     ExecutionMode mode_;
     double sampling_interval_ms_;
     BandwidthCounterSelection counter_selection_;
-    std::map<std::string, long long> extra_perf_values_;
+    mutable std::map<std::string, long long> extra_perf_values_;
+    
+    int cached_cache_line_size_ = 64;
+    double cached_scaling_factor_ = 1.0;
+    mutable bool scaling_factor_initialized_ = false;
 
     bool relaunch_traffic_gen(int ratio, int pause, int traffic_gen_cores);
+    void ensure_scaling_factor_cached() const;
+    int get_traffic_gen_cores() const;
     
 public:
+    using MonitorSampleExtras = std::map<std::string, long long>;
+    using MonitorCallback = std::function<void(double timestamp,
+                                               double bw_gbps,
+                                               long long raw_rd,
+                                               long long raw_wr,
+                                               const MonitorSampleExtras& extra_values)>;
+
     virtual bool monitor_command(const std::string& command, 
-                                 std::function<void(double timestamp, double bw_gbps, long long raw_rd, long long raw_wr)> callback, 
+                                 MonitorCallback callback,
                                  bool summary_mode) {
         (void)command; (void)callback; (void)summary_mode;
         return false; 
@@ -218,10 +238,8 @@ public:
 
 private:
     const BenchmarkConfig& config_;
-    MeasurementStorage* storage_;
     PtrChaseProcessManager* ptrchase_manager_;
     std::function<std::vector<int>()> numa_resolver_;
-    int cache_line_size_;
     double ptrchase_accesses_per_burst_;
     double ptrchase_insts_per_access_;
     uint64_t ptrchase_burst_iters_;

@@ -44,6 +44,12 @@
 #include <sys/sysctl.h>
 #endif
 
+namespace {
+constexpr double kDefaultTlbLatencyNs = 1.0;
+constexpr double kMinReasonableTlbLatencyNs = 0.1;
+constexpr int kMaxTlbMeasureAttempts = 2;
+}
+
 int get_cache_line_size() {
 #if defined(__APPLE__)
     size_t line_size = 0;
@@ -93,10 +99,6 @@ TLBMeasurement measure_and_set_tlb_latency(int attempt) {
     if (tlb_env) {
         result.latency_ns = std::stod(tlb_env);
         return result;
-    }
-    
-    if (attempt > 1) {
-        std::cout << "TLB measurement attempt " << attempt << std::endl;
     }
     
     result.latency_ns = 0.0;
@@ -172,7 +174,8 @@ TLBMeasurement measure_and_set_tlb_latency(int attempt) {
                       << (patch_error.empty() ? "Unknown issue." : patch_error) << std::endl;
             std::cerr << "LMBench could not be compiled. Make sure to have the necessary files under the tools directory.\n"
                       << "If you don't, try running: \"git submodule update --init --recursive\" to download them." << std::endl;
-            std::exit(EXIT_FAILURE);
+            result.latency_ns = kDefaultTlbLatencyNs;
+            return result;
         }
         
         std::filesystem::path tools_src = root / "tools/lmbench/src";
@@ -206,7 +209,8 @@ TLBMeasurement measure_and_set_tlb_latency(int attempt) {
                 }
                 std::cerr << "LMBench could not be compiled. Make sure to have the necessary files under the tools directory.\n"
                           << "If you don't, try running: \"git submodule update --init --recursive\" to download them." << std::endl;
-                std::exit(EXIT_FAILURE);
+                result.latency_ns = kDefaultTlbLatencyNs;
+                return result;
             }
         } else {
             std::cerr << "ERROR: Failed to execute compilation command";
@@ -214,7 +218,8 @@ TLBMeasurement measure_and_set_tlb_latency(int attempt) {
             std::cerr << std::endl;
             std::cerr << "LMBench could not be compiled. Make sure to have the necessary files under the tools directory.\n"
                       << "If you don't, try running: \"git submodule update --init --recursive\" to download them." << std::endl;
-            std::exit(EXIT_FAILURE);
+            result.latency_ns = kDefaultTlbLatencyNs;
+            return result;
         }
         tlb_binary_path = build_bin_tlb.string();
     }
@@ -228,8 +233,8 @@ TLBMeasurement measure_and_set_tlb_latency(int attempt) {
         std::cerr << "WARNING: Failed to run TLB measurement command: " << tlb_run_cmd;
         if (attempt > 0) std::cerr << " (attempt " << attempt << "/5)";
         std::cerr << std::endl;
-        std::cerr << "Using default TLB hit latency: 2.33921 ns" << std::endl;
-        result.latency_ns = 2.33921;
+        std::cerr << "Using default TLB hit latency: " << kDefaultTlbLatencyNs << " ns" << std::endl;
+        result.latency_ns = kDefaultTlbLatencyNs;
         return result;
     }
     
@@ -287,7 +292,17 @@ TLBMeasurement measure_and_set_tlb_latency(int attempt) {
         std::cerr << "WARNING: Failed to parse TLB measurement output";
         if (attempt > 0) std::cerr << " (attempt " << attempt << "/5)";
         std::cerr << std::endl;
-        tlb_ns = 2.33921;
+        tlb_ns = kDefaultTlbLatencyNs;
+    }
+
+    if (tlb_ns > 0.0 && tlb_ns < kMinReasonableTlbLatencyNs) {
+        if (attempt < kMaxTlbMeasureAttempts) {
+            return measure_and_set_tlb_latency(attempt + 1);
+        }
+        std::cerr << "WARNING: TLB latency remained unrealistically low after retry ("
+                  << tlb_ns << " ns). Using default TLB hit latency: "
+                  << kDefaultTlbLatencyNs << " ns" << std::endl;
+        tlb_ns = kDefaultTlbLatencyNs;
     }
     
     if (setenv("TLB_HIT_LATENCY_NS", std::to_string(tlb_ns).c_str(), 1) == 0) {

@@ -50,7 +50,6 @@ private:
 
     std::vector<OptionSpec> specs_;
 
-    bool parse_size(const std::string& s, SizeTier& out);
     bool parse_bind(const std::string& s, std::vector<int>& out);
     bool parse_ratios(const std::string& s, std::vector<double>& out);
     bool parse_pauses(const std::string& s, std::vector<int>& out);
@@ -63,7 +62,6 @@ public:
     bool parse(int argc, char** argv, BenchmarkConfig& config);
     void print_help(const char* argv0);
     
-    // Display the current configuration
     void display_configuration(const BenchmarkConfig& config, 
                              bool perf_accessible, 
                              int paranoid_level, 

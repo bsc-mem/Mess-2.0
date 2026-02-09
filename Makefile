@@ -56,7 +56,7 @@ SRCS = Mess.cpp \
        src/measurement/measurement_storage.cpp \
        src/measurement/latency_measurer.cpp \
        src/measurement/outlier_detector.cpp \
-       src/measurement/bandwidth_measurer.cpp \
+       src/measurement/MeasurementUtils.cpp \
        src/measurement/BandwidthMeasurerFactory.cpp \
        src/measurement/bw_measurers/PerfBandwidthMeasurer.cpp \
        src/measurement/bw_measurers/LikwidBandwidthMeasurer.cpp \
@@ -102,7 +102,7 @@ $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
 ARCH_SRCS = src/arch/ArchitectureRegistry.cpp \
-            src/arch/PerformanceCounterStrategy.cpp \
+            src/arch/BandwidthCounterStrategy.cpp \
             src/arch/x86/X86Architecture.cpp \
             src/arch/x86/X86Assembler.cpp \
             src/arch/x86/X86Counters.cpp \
@@ -142,7 +142,7 @@ $(BIN_DIR)/generate_code: src/system_detection.o src/kernel_generator.o generate
 
 MESS_PROFILER_OBJS = src/system_detection.o \
                      src/benchmark_config.o \
-                     src/measurement/bandwidth_measurer.o \
+                     src/measurement/MeasurementUtils.o \
                      src/measurement/BandwidthMeasurerFactory.o \
                      src/measurement/bw_measurers/PerfBandwidthMeasurer.o \
                      src/measurement/bw_measurers/LikwidBandwidthMeasurer.o \
@@ -151,7 +151,6 @@ MESS_PROFILER_OBJS = src/system_detection.o \
                      src/process/traffic_gen_process_manager.o \
                      src/profiler/process_binding.o \
                      src/profiler/profiler_config.o \
-                     src/profiler/perf_event_profiler.o \
                      src/utils.o
 
 $(BIN_DIR)/mess-profiler: mess_profiler.cpp $(MESS_PROFILER_OBJS) $(ARCH_OBJS) $(LIBS) | $(BIN_DIR)
@@ -171,14 +170,13 @@ generate_code.o: generate_code.cpp $(HEADERS)
 
 clean:
 	rm -f $(OBJS) $(ARCH_OBJS) $(LIBS) $(TARGETS)
-	rm -rf $(BUILD_DIR)/ measuring/*
-	rm -rf output/*
+	rm -rf $(BUILD_DIR)/
 	rm -rf src/traffic_gen/build
 	rm -rf src/traffic_gen/src/nop.c
 	rm -rf src/traffic_gen/src/nop_*.c
 	rm -rf src/traffic_gen/src/generated_*.c
 	rm -rf src/traffic_gen/src/utils_*.c
-	rm -f *.o src/arch/*.o src/arch/*/*.o
+	rm -f *.o src/arch/*.o src/arch/*/*.o src/profiler/*.o
 	rm -rf build/*
 
 

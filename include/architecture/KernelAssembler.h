@@ -56,6 +56,8 @@ public:
     virtual std::string getPointerChaseLoopAsm() const = 0;
     virtual std::string getPointerChaseInstruction() const = 0;
     virtual std::string generatePointerChaseBurstLoop() const = 0;
+
+    virtual std::string generateNopFile() const = 0;
     
 };
 

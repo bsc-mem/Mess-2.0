@@ -31,8 +31,14 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#ifndef TRAFFIC_GEN_UTILS_H
+#define TRAFFIC_GEN_UTILS_H
+
+#include <sys/types.h>
+
 void print_usage(char *argv[], char* usage);
 int TrafficGen_get_ratio_granularity(void);
 void TrafficGen_copy_rw(double *a_array, double *b_array, ssize_t *array_size, int *pause, int rd_percentage);
-int TrafficGen_get_ratio_granularity(void);
 int TrafficGen_get_loop_increment(int ratio);
+
+#endif

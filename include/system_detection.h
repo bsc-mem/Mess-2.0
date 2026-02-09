@@ -95,27 +95,23 @@ struct CPUCapabilities {
     int sockets;
     std::vector<ISAExtension> extensions;
 
-    // Cache information
     size_t l1d_size;  // L1 data cache size in bytes
     size_t l1i_size;  // L1 instruction cache size in bytes
     size_t l2_size;   // L2 cache size in bytes
     size_t l3_size;   // L3 cache size in bytes
 
-    // Memory information
     size_t total_memory;
     int memory_channels;
     std::string memory_type;
     std::string memory_frequency;
     int bus_width; 
 
-    // UPI / Remote Memory Information
     double upi_freq;       // GT/s
     int n_data_lanes;
     int flit_bit;
     int data_flit_bit;
     int n_upi_channels;
 
-    // NVLink-C2C (Grace) Information
     double nvlink_bw_gb_s = 0.0;  // GB/s per direction
 };
 

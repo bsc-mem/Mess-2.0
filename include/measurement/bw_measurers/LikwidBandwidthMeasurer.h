@@ -41,14 +41,13 @@
 
 class LikwidBandwidthMeasurer : public BandwidthMeasurer {
 public:
-    LikwidBandwidthMeasurer(const BenchmarkConfig& config, const system_info& sys_info, MeasurementStorage* storage, TrafficGenProcessManager* traffic_gen_manager, std::function<std::vector<int>()> numa_resolver, ExecutionMode mode)
-        : BandwidthMeasurer(config, sys_info, storage, traffic_gen_manager, numa_resolver, mode) {}
+    using BandwidthMeasurer::BandwidthMeasurer;
 
     bool sample_bandwidth(long long& cas_rd, long long& cas_wr, double& elapsed, const std::vector<int>& mem_nodes) const override;
     bool wait_for_stabilization(int& samples_taken, long long& last_cas_rd, long long& last_cas_wr, double& last_elapsed, int pause, int ratio, bool fast_resume, std::function<void()> on_sample) override;
 
     bool monitor_command(const std::string& command, 
-                         std::function<void(double timestamp, double bw_gbps, long long raw_rd, long long raw_wr)> callback, 
+                         MonitorCallback callback,
                          bool summary_mode) override;
 
     std::string find_likwid_binary() const;
@@ -67,6 +66,10 @@ private:
     
     std::vector<MemoryChannel> parse_memory_counters(const std::string& output, const std::string& memType) const;
     std::vector<UpiChannel> parse_upi_counters(const std::string& output) const;
+    
+    void parse_likwid_header(const std::string& line, CounterType type,
+                              std::vector<int>& rdIndices, std::vector<int>& wrIndices) const;
+    std::pair<std::string, CounterType> determine_memory_type() const;
 
     mutable std::string cached_likwid_binary_;
     mutable std::map<CounterType, std::string> event_string_cache_;

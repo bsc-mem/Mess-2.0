@@ -11,7 +11,7 @@ def process_data(measuring_dir):
     if os.path.exists(config_path):
         with open(config_path, 'r') as f:
             config = dict(x.rstrip().split("=", 1) for x in f if '=' in x and not x.startswith('#'))
-        print(f"Loaded plotter config from {config_path}")
+        #print(f"Loaded plotter config from {config_path}")
     else:
         print(f"Error: plotter.txt not found in {measuring_dir}")
         print("Please run generate_code first to create the configuration file")
@@ -134,7 +134,8 @@ def calculate_mean_curves(df_bw, df_lat, step, mode):
     
         # Optional: sanity check
         if df_lat['read_pct_rounded'].isna().any():
-            print("Warning: Some rows in df_lat could not be matched with read_pct_rounded!")
+            #print("Warning: Some rows in df_lat could not be matched with read_pct_rounded!")
+            pass
     else: 
         reads= df_bw[read_label]
         df_bw[read_label] = (np.round( reads/ step) * step).astype(int)
@@ -173,7 +174,25 @@ def smooth_curves(df, mode):
         
         if 'bandwidth' in df_rw.columns:
             df_rw = df_rw.sort_values('bandwidth')
+            min_lat = df_rw['latency'].min()
+            # Create a 0-point row
+            zero_row = df_rw.iloc[0].copy()
+            zero_row['bandwidth'] = 0
+            zero_row['latency'] = min_lat
+            # Depending on index/other columns, we might need to be careful
+            # Append and resort
+            df_rw = pd.concat([pd.DataFrame([zero_row]), df_rw], ignore_index=True)
+            df_rw = df_rw.sort_values('bandwidth')
+
         elif 'bandwidth_mean' in df_rw.columns:
+            df_rw = df_rw.sort_values('bandwidth_mean')
+            min_lat = df_rw['latency_mean'].min()
+            # Create a 0-point row
+            zero_row = df_rw.iloc[0].copy()
+            zero_row['bandwidth_mean'] = 0
+            zero_row['latency_mean'] = min_lat
+            # Append and resort
+            df_rw = pd.concat([pd.DataFrame([zero_row]), df_rw], ignore_index=True)
             df_rw = df_rw.sort_values('bandwidth_mean')
         
         if 'bandwidth' in df_rw.columns and 'latency' in df_rw.columns:
@@ -223,6 +242,7 @@ def filter_incomplete_ratios(df, read_label, threshold_ratio=0.6):
             dropped_ratios.append(ratio)
             
     if dropped_ratios:
-        print(f"Filtered out {len(dropped_ratios)} ratios with insufficient data (<{threshold:.1f} points): {dropped_ratios}")
+        #print(f"Filtered out {len(dropped_ratios)} ratios with insufficient data (<{threshold:.1f} points): {dropped_ratios}")
+        pass
             
     return df[df[read_label].isin(ratios_to_keep)]

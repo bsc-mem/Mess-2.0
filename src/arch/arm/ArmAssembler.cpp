@@ -37,11 +37,12 @@
 std::string ArmAssembler::generateLoad(int /*offset*/, int reg) const {
     std::ostringstream oss;
     if (config_.isa_mode == ISAMode::SVE) {
-        oss << "        \"ld1d {z" << reg << ".d}, p0/z, [x0], #1, MUL VL;\\n\"\n";
+        oss << "        \"ld1d {z" << reg << ".d}, p0/z, [x19];\\n\"\n"
+            << "        \"add x19, x19, #64;\\n\"\n";
     } else {
         int r1 = (2 * reg) % 32;
         int r2 = (2 * reg + 1) % 32;
-        oss << "        \"LDP Q" << r1 << ", Q" << r2 << ", [%0], #128;\\n\"\n";
+        oss << "        \"LDP Q" << r1 << ", Q" << r2 << ", [x19], #128;\\n\"\n";
     }
     return oss.str();
 }
@@ -50,26 +51,26 @@ std::string ArmAssembler::generateStore(int /*offset*/, int reg) const {
     std::ostringstream oss;
     if (config_.isa_mode == ISAMode::SVE) {
         std::string op = config_.use_nontemporal_stores ? "stnt1d" : "st1d";
-        oss << "        \"" << op << " {z" << reg << ".d}, p0, [x4], #1, MUL VL;\\n\"\n";
+        oss << "        \"" << op << " {z" << reg << ".d}, p0, [x20];\\n\"\n"
+            << "        \"add x20, x20, #64;\\n\"\n";
     } else {
         int r1 = (2 * reg) % 32;
         int r2 = (2 * reg + 1) % 32;
-        std::string op = config_.use_nontemporal_stores ? "STNP" : "STP";
-        oss << "        \"" << op << " Q" << r1 << ", Q" << r2 << ", [%4], #128;\\n\"\n";
+        oss << "        \"STP Q" << r1 << ", Q" << r2 << ", [x20], #128;\\n\"\n";
     }
     return oss.str();
 }
 
 std::string ArmAssembler::generateLoopControl(int increment, int labelId) const {
     std::ostringstream oss;
-    
+
     auto safe_add = [](const char* reg, int val) {
         std::ostringstream ss;
         if (val < 4096 && val > -4096) {
              ss << "        \"add " << reg << ", " << reg << ", #" << val << ";\\n\"\n";
         } else {
              ss << "        \"movz x9, #0x" << std::hex << (val & 0xFFFF) << ";\\n\"\n";
-             if (val > 0xFFFF) ss << "        \"movk x9, #0x" << std::hex << ((val >> 16) & 0xFFFF) << ", LSL #16;\\n\"\n"; 
+             if (val > 0xFFFF) ss << "        \"movk x9, #0x" << std::hex << ((val >> 16) & 0xFFFF) << ", LSL #16;\\n\"\n";
              ss << "        \"add " << reg << ", " << reg << ", x9;\\n\"\n";
         }
         return ss.str();
@@ -77,16 +78,21 @@ std::string ArmAssembler::generateLoopControl(int increment, int labelId) const 
 
     int loopIncrement = increment;
     oss << "\n"
-        << safe_add("x1", loopIncrement)
-        << "        \"cmp     x1, %2;\\n\"\n"
-        << "        \"blt        ..L_" << labelId << ";\\n\"\n";
+        << safe_add("x21", loopIncrement);
+
+    if (config_.isa_mode == ISAMode::SVE) {
+        oss << "        \"cmp x21, x22;\\n\"\n";
+    } else {
+        oss << "        \"cmp x21, %2;\\n\"\n";
+    }
+    oss << "        \"blt ..L_" << labelId << ";\\n\"\n";
     return oss.str();
 }
 
 std::string ArmAssembler::generatePause() const {
-    return "        \"mov x11, x30;\\n\"\n"
+    return "        \"mov x22, x30;\\n\"\n"
            "        \"bl  nop_;\\n\"\n"
-           "        \"mov x30, x11;\\n\"\n";
+           "        \"mov x30, x22;\\n\"\n";
 }
 
 std::string ArmAssembler::generateHeader() const {
@@ -112,7 +118,7 @@ std::string ArmAssembler::generateRegisterSetup() const {
 
 std::string ArmAssembler::generateVectorRegisterInit() const {
     if (config_.isa_mode == ISAMode::SVE) {
-        return "    asm __volatile__(\"ptrue p0.d\");\n\n";
+        return "      \"ptrue p0.d;\\n\"\n";
     }
     return "";
 }
@@ -123,14 +129,21 @@ std::string ArmAssembler::generateFooter() const {
 
 std::string ArmAssembler::generateAsmStart() const {
     return "    asm __volatile__ (\n"
-           "      \"mov x1, #0x0;\"\n"
-           "      \"mov x4, %3;\"\n";
+           "      \"mov x21, #0x0;\\n\"\n" 
+           "      \"mov x19, %0;\\n\"\n"   
+           "      \"mov x20, %4;\\n\"";    
 }
 
 std::string ArmAssembler::generateAsmEnd() const {
+    if (config_.isa_mode == ISAMode::SVE) {
+        return "      :\n"
+               "      : \"r\" (a_array), \"r\" (i), \"r\" (*array_size), \"r\" (*pause), \"r\" (b_array)\n"
+               "      : \"x9\", \"x19\", \"x20\", \"x21\", \"x22\", \"x30\", \"z0\", \"p0\", \"memory\", \"cc\"\n"
+               "    );\n";
+    }
     return "      :\n"
            "      : \"r\" (a_array), \"r\" (i), \"r\" (*array_size), \"r\" (*pause), \"r\" (b_array)\n"
-           "      : \"x0\", \"x1\", \"x2\", \"x3\", \"x4\", \"x5\", \"x6\", \"x7\", \"x8\", \"x9\", \"x10\", \"x11\", \"x12\", \"x13\", \"x14\", \"x15\", \"x16\", \"x17\", \"x18\", \"x30\", \"q0\", \"q1\", \"memory\", \"cc\"\n"
+           "      : \"x9\", \"x19\", \"x20\", \"x21\", \"x22\", \"x30\", \"q0\", \"q1\", \"memory\", \"cc\"\n"
            "    );\n";
 }
 
@@ -160,6 +173,34 @@ std::string ArmAssembler::generatePointerChaseBurstLoop() const {
         );
 
         current_offset = next;
+)";
+}
+
+std::string ArmAssembler::generateNopFile() const {
+    return R"(#include <stdlib.h>
+#include <stdio.h>
+
+
+void volatile nop_(void) {
+
+    asm __volatile__ (
+      "cmp x4, #0x0;\n"
+      "bne start_pause;\n"
+      "b end;\n"
+      "start_pause:"
+      "mov x10, x4;\n"
+      "start_loop:\n"
+      "nop;\n"
+      "subs x10, x10, #0x01;\n"
+      "cmp x10, #0x0;\n"
+      "bne start_loop;\n"
+      "end:"
+      :
+      :
+      : "x30", "x4", "x10"
+    );
+
+}
 )";
 }
 

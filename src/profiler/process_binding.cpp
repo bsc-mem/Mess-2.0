@@ -37,12 +37,24 @@
 #include <algorithm>
 #include <filesystem>
 #include <cstring>
+#include <unistd.h>
 
 #ifdef __linux__
 #include <sched.h>
-#include <unistd.h>
 #include <sys/syscall.h>
 #endif
+
+static int get_total_online_cpus() {
+#ifdef __linux__
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n > 0) {
+        return static_cast<int>(n);
+    }
+    return CPU_SETSIZE;
+#else
+    return 1024;
+#endif
+}
 
 std::string ProcessBinding::describe() const {
     std::stringstream ss;
@@ -116,7 +128,9 @@ ProcessBinding ProcessBindingDetector::detect_for_pid(pid_t pid) {
     
     std::set<int> all_nodes = get_all_system_nodes();
     
-    if (binding.allowed_cpus.size() < 256) {
+    int total_online_cpus = get_total_online_cpus();
+    if (!binding.allowed_cpus.empty() &&
+        static_cast<int>(binding.allowed_cpus.size()) < total_online_cpus) {
         binding.is_cpu_bound = true;
         binding.binding_source = "sched_getaffinity";
     }
@@ -165,6 +179,9 @@ std::set<int> ProcessBindingDetector::get_cpu_affinity_mask_for_pid(pid_t pid) {
         }
     }
 #endif
+#ifndef __linux__
+    (void)pid;
+#endif
     
     return cpus;
 }
@@ -196,6 +213,9 @@ std::set<int> ProcessBindingDetector::get_membind_nodes_for_pid(pid_t pid) {
         }
     }
 #endif
+#ifndef __linux__
+    (void)pid;
+#endif
     
     return nodes;
 }
@@ -216,6 +236,9 @@ std::set<int> ProcessBindingDetector::cpus_to_numa_nodes(const std::set<int>& cp
             }
         }
     }
+#endif
+#ifndef __linux__
+    (void)cpus;
 #endif
     
     return nodes;
@@ -259,6 +282,10 @@ bool ProcessBindingDetector::is_remote_access(int cpu, int mem_node) {
         }
     }
 #endif
+#ifndef __linux__
+    (void)cpu;
+    (void)mem_node;
+#endif
     return false;
 }
 
@@ -293,7 +320,6 @@ std::set<int> ProcessBindingDetector::parse_node_mask(const std::string& mask_st
         }
     }
     
-    int total_bits = cleaned.size() * 4;
     int node = 0;
     
     for (int i = static_cast<int>(cleaned.size()) - 1; i >= 0; --i) {

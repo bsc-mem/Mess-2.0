@@ -77,6 +77,12 @@ bool modelContains(const std::string& model, const std::string& token) {
     return toLower(model).find(toLower(token)) != std::string::npos;
 }
 
+std::unique_ptr<BandwidthCounterStrategy> makeLatestIntelCounterStrategy() {
+    // Keep unknown Intel fallback pinned to latest supported Intel server generation.
+    // Update this helper when adding a newer Intel counter implementation.
+    return std::make_unique<IntelGraniteRapidsCounters>();
+}
+
 }
 
 bool X86Architecture::supports(const CPUCapabilities& caps) const {
@@ -87,7 +93,7 @@ std::unique_ptr<KernelAssembler> X86Architecture::createAssembler(const KernelCo
     return std::make_unique<X86Assembler>(config);
 }
 
-std::unique_ptr<PerformanceCounterStrategy> X86Architecture::createCounterStrategy([[maybe_unused]] const CPUCapabilities& caps) const {
+std::unique_ptr<BandwidthCounterStrategy> X86Architecture::createCounterStrategy(const CPUCapabilities& caps) const {
     std::string model = caps.model_name;
     
     if (caps.vendor == CPUVendor::INTEL) {
@@ -101,7 +107,7 @@ std::unique_ptr<PerformanceCounterStrategy> X86Architecture::createCounterStrate
             return std::make_unique<IntelSkylakeCounters>();
         }
         
-        return std::make_unique<IntelGraniteRapidsCounters>();
+        return makeLatestIntelCounterStrategy();
         
     } else if (caps.vendor == CPUVendor::AMD) {
         if (modelContains(model, "genoa") || modelContains(model, "bergamo") || modelContains(model, "zen4") || modelContains(model, "zen 4")) {
@@ -120,7 +126,8 @@ std::vector<std::shared_ptr<ISA>> X86Architecture::getSupportedISAs() const {
     return {
         std::make_shared<X86ISA>(ISAMode::AVX512, "AVX-512", 512, 32),
         std::make_shared<X86ISA>(ISAMode::AVX2,   "AVX2",    256, 16),
-        std::make_shared<X86ISA>(ISAMode::AVX,    "AVX",     256, 16)
+        std::make_shared<X86ISA>(ISAMode::AVX,    "AVX",     256, 16),
+        std::make_shared<X86ISA>(ISAMode::SCALAR, "SCALAR",  64,  14)
     };
 }
 
@@ -133,38 +140,7 @@ std::shared_ptr<ISA> X86Architecture::selectBestISA(const CPUCapabilities& caps)
     if (has(ISAExtension::AVX512)) return std::make_shared<X86ISA>(ISAMode::AVX512, "AVX-512", 512, 32);
     if (has(ISAExtension::AVX))    return std::make_shared<X86ISA>(ISAMode::AVX,    "AVX",     256, 16);
     
-    return std::make_shared<X86ISA>(ISAMode::AVX, "AVX", 256, 16); // Fallback
-}
-
-std::string X86Architecture::generateNopFile() const {
-    return R"(#include <stdlib.h>
-#include <stdio.h>
-
-int nop(int *ntimes) {
-	unsigned int i  = *ntimes;
-        if ( !i ) {
-            return 0;
-        } else {
-            asm(
-                "mov %0, %%ecx;\n"
-                "the_loop%=:\n"
-                "nop;\n"
-                "dec %%ecx;\n"
-                "jnz the_loop%=;\n"
-                :
-                : "r" (i)
-                :"ecx"
-            );
-        }
-
-	return 0;
-}
-
-int nop_(int *ntimes)
-{
-    return nop(ntimes);
-}
-)";
+    return std::make_shared<X86ISA>(ISAMode::SCALAR, "SCALAR", 64, 14);
 }
 
 double X86Architecture::getUpiScalingFactor(const CPUCapabilities& caps) const {
@@ -176,4 +152,3 @@ double X86Architecture::getUpiScalingFactor(const CPUCapabilities& caps) const {
     }
     return 1.0;
 }
-

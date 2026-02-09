@@ -35,45 +35,58 @@
 #include "arch/power/PowerAssembler.h"
 #include "arch/power/PowerCounters.h"
 #include "architecture/ArchitectureRegistry.h"
+#include "architecture/ISA.h"
 #include <algorithm>
+
+namespace {
+
+class PowerISA : public ISA {
+public:
+    PowerISA(ISAMode mode, std::string name, int width_bits, int regs)
+        : mode_(mode), name_(std::move(name)), width_bits_(width_bits), regs_(regs) {}
+
+    ISAMode getMode() const override { return mode_; }
+    std::string getName() const override { return name_; }
+    int getVectorWidthBits() const override { return width_bits_; }
+    int getMaxSimdRegisters() const override { return regs_; }
+
+private:
+    ISAMode mode_;
+    std::string name_;
+    int width_bits_;
+    int regs_;
+};
+
+}
 
 std::unique_ptr<KernelAssembler> PowerArchitecture::createAssembler(const KernelConfig& config) const {
     return std::make_unique<PowerAssembler>(config);
 }
 
-std::unique_ptr<PerformanceCounterStrategy> PowerArchitecture::createCounterStrategy(const CPUCapabilities&) const {
+std::unique_ptr<BandwidthCounterStrategy> PowerArchitecture::createCounterStrategy(const CPUCapabilities&) const {
     return std::make_unique<PowerCounters>();
 }
 
-std::vector<std::shared_ptr<ISA>> PowerArchitecture::getSupportedISAs() const { return {}; }
-std::shared_ptr<ISA> PowerArchitecture::selectBestISA(const CPUCapabilities&) const { return nullptr; }
-
-std::string PowerArchitecture::generateNopFile() const {
-    return R"(#include <stdlib.h>
-#include <stdio.h>
-
-extern "C" void volatile nop_(void) {
-    asm __volatile__ (
-        "cmpli 0, 1, 4, 0;\n"
-        "bne start_pause;\n"
-        "b end;\n"
-        "start_pause:"
-        "start_loop2:\n"
-        "nop;\n"
-        "addi 4, 4, -0x01;\n"
-        "cmpli 0, 1, 4, 0x00;\n"
-        "bne start_loop2;\n"
-        "end:"
-        :
-        :
-        : "4", "10"
-    );
+std::vector<std::shared_ptr<ISA>> PowerArchitecture::getSupportedISAs() const {
+    return {
+        std::make_shared<PowerISA>(ISAMode::VSX, "VSX", 128, 64),
+        std::make_shared<PowerISA>(ISAMode::VMX, "VMX", 128, 32),
+        std::make_shared<PowerISA>(ISAMode::SCALAR, "SCALAR", 64, 16)
+    };
 }
 
-int nop(int *ntimes) {
-    return 0;
-}
-)";
+std::shared_ptr<ISA> PowerArchitecture::selectBestISA(const CPUCapabilities& caps) const {
+    auto has = [&](ISAExtension e) {
+        return std::find(caps.extensions.begin(), caps.extensions.end(), e) != caps.extensions.end();
+    };
+
+    if (has(ISAExtension::VSX)) {
+        return std::make_shared<PowerISA>(ISAMode::VSX, "VSX", 128, 64);
+    }
+    if (has(ISAExtension::VMX)) {
+        return std::make_shared<PowerISA>(ISAMode::VMX, "VMX", 128, 32);
+    }
+    return std::make_shared<PowerISA>(ISAMode::SCALAR, "SCALAR", 64, 16);
 }
 
 double PowerArchitecture::getUpiScalingFactor(const CPUCapabilities&) const {

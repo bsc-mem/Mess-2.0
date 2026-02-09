@@ -40,7 +40,123 @@
 #include <fcntl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <cmath>
+#include <cctype>
+#include <mutex>
 
+namespace {
+
+bool command_exists_in_path(const std::string& command) {
+    if (command.empty()) {
+        return false;
+    }
+
+    const char* path_env = std::getenv("PATH");
+    if (!path_env) {
+        return false;
+    }
+
+    std::stringstream path_stream(path_env);
+    std::string path_entry;
+    while (std::getline(path_stream, path_entry, ':')) {
+        if (path_entry.empty()) {
+            path_entry = ".";
+        }
+        std::filesystem::path candidate = std::filesystem::path(path_entry) / command;
+        if (access(candidate.c_str(), X_OK) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool read_int_file(const std::filesystem::path& file_path, int& value) {
+    std::ifstream file(file_path);
+    if (!file.is_open()) {
+        return false;
+    }
+    file >> value;
+    return file.good() || file.eof();
+}
+
+std::map<int, CpuTopology> get_cpu_topology_from_sysfs() {
+    std::map<int, CpuTopology> cpu_topo;
+    std::error_code ec;
+    const std::filesystem::path cpu_root("/sys/devices/system/cpu");
+    for (const auto& entry : std::filesystem::directory_iterator(cpu_root, ec)) {
+        if (ec) {
+            break;
+        }
+        if (!entry.is_directory(ec)) {
+            continue;
+        }
+
+        const std::string name = entry.path().filename().string();
+        if (name.rfind("cpu", 0) != 0 || name.size() <= 3) {
+            continue;
+        }
+
+        bool numeric_suffix = true;
+        for (size_t i = 3; i < name.size(); ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(name[i]))) {
+                numeric_suffix = false;
+                break;
+            }
+        }
+        if (!numeric_suffix) {
+            continue;
+        }
+
+        int cpu = 0;
+        try {
+            cpu = std::stoi(name.substr(3));
+        } catch (...) {
+            continue;
+        }
+
+        int socket = 0;
+        read_int_file(entry.path() / "topology" / "physical_package_id", socket);
+
+        int node = -1;
+        std::error_code node_ec;
+        for (const auto& node_entry : std::filesystem::directory_iterator(entry.path(), node_ec)) {
+            if (node_ec) {
+                break;
+            }
+            const std::string node_name = node_entry.path().filename().string();
+            if (node_name.rfind("node", 0) != 0 || node_name.size() <= 4) {
+                continue;
+            }
+
+            bool node_numeric = true;
+            for (size_t i = 4; i < node_name.size(); ++i) {
+                if (!std::isdigit(static_cast<unsigned char>(node_name[i]))) {
+                    node_numeric = false;
+                    break;
+                }
+            }
+            if (!node_numeric) {
+                continue;
+            }
+
+            try {
+                node = std::stoi(node_name.substr(4));
+            } catch (...) {
+                node = -1;
+            }
+            if (node >= 0) {
+                break;
+            }
+        }
+
+        cpu_topo[cpu] = {node >= 0 ? node : 0, socket};
+    }
+
+    return cpu_topo;
+}
+
+}
 
 int get_current_numa_node() {
 #ifdef __linux__
@@ -157,8 +273,13 @@ void append_memory_config_to_plotter(const std::filesystem::path& plotter_path, 
 }
 
 std::map<int, CpuTopology> get_cpu_topology() {
-    std::map<int, CpuTopology> cpu_topo;
-    FILE* pipe = popen("lscpu -p=cpu,node,socket", "r");
+    std::map<int, CpuTopology> cpu_topo = get_cpu_topology_from_sysfs();
+    if (!cpu_topo.empty()) {
+        return cpu_topo;
+    }
+
+    cpu_topo.clear();
+    FILE* pipe = popen("lscpu -p=cpu,node,socket 2>/dev/null", "r");
     if (!pipe) {
         return cpu_topo;
     }
@@ -192,20 +313,28 @@ std::map<int, std::set<int>> get_socket_to_nodes_map(const std::map<int, CpuTopo
     return socket_nodes;
 }
 
+
+uint64_t calculate_traffic_gen_array_size(uint64_t l3_size_bytes) {
+    uint64_t arg1 = 5ULL * 1000 * 1000 * 1000;
+    uint64_t arg2 = l3_size_bytes * 10;
+    return std::min(arg1, arg2) / sizeof(double);
+}
+
 SystemToolsCache& SystemToolsCache::instance() {
     static SystemToolsCache cache;
     return cache;
 }
 
 void SystemToolsCache::init() {
+    static std::mutex init_mutex;
+    std::lock_guard<std::mutex> lock(init_mutex);
     if (initialized) return;
-    
-    have_taskset = run_command_success("command -v taskset >/dev/null 2>&1");
-    have_numactl = run_command_success("command -v numactl >/dev/null 2>&1");
-    have_srun = run_command_success("command -v srun >/dev/null 2>&1");
-    have_mpirun = run_command_success("command -v mpirun >/dev/null 2>&1");
+
+    have_taskset = command_exists_in_path("taskset");
+    have_numactl = command_exists_in_path("numactl");
+    have_srun = command_exists_in_path("srun");
+    have_mpirun = command_exists_in_path("mpirun");
     cpu_topology = get_cpu_topology();
     
     initialized = true;
 }
-

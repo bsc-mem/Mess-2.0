@@ -71,7 +71,7 @@ std::unique_ptr<KernelAssembler> ArmArchitecture::createAssembler(const KernelCo
     return std::make_unique<ArmAssembler>(config);
 }
 
-std::unique_ptr<PerformanceCounterStrategy> ArmArchitecture::createCounterStrategy(const CPUCapabilities& caps) const {
+std::unique_ptr<BandwidthCounterStrategy> ArmArchitecture::createCounterStrategy(const CPUCapabilities& caps) const {
     auto toLower = [](const std::string& str) {
         std::string result = str;
         std::transform(result.begin(), result.end(), result.begin(),
@@ -113,36 +113,6 @@ std::shared_ptr<ISA> ArmArchitecture::selectBestISA(const CPUCapabilities& /*cap
     return makeArmISA(ISAMode::NEON, "NEON", 256, 32);
 }
 
-std::string ArmArchitecture::generateNopFile() const {
-    return R"(#include <stdlib.h>
-#include <stdio.h>
-
-
-void volatile nop_(void) {
-
-    asm __volatile__ (
-      "cmp x4, #0x0;\n"
-      "bne start_pause;\n"
-      "b end;\n"
-      "start_pause:"
-      "mov x10, x4;\n"
-      "start_loop:\n"
-      "nop;\n"
-      "subs x10, x10, #0x01;\n"
-      "cmp x10, #0x0;\n"
-      "bne start_loop;\n"
-      // "blr x30;\n"
-      "end:"
-      :
-      :
-      : "x30", "x4", "x10"
-    );
-
-}
-)";
-}
-
 double ArmArchitecture::getUpiScalingFactor(const CPUCapabilities&) const {
     return 1.0;
 }
-

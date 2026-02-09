@@ -61,13 +61,13 @@
 
 LatencyMeasurer::LatencyMeasurer(const BenchmarkConfig& config, MeasurementStorage* storage, PtrChaseProcessManager* ptrchase_manager, std::function<std::vector<int>()> numa_resolver, int cache_line_size)
     : config_(config),
-      storage_(storage),
       ptrchase_manager_(ptrchase_manager),
       numa_resolver_(std::move(numa_resolver)),
-      cache_line_size_(cache_line_size),
       ptrchase_accesses_per_burst_(0.0),
       ptrchase_insts_per_access_(0.0) {
-        //init_ptrchase_scaling();
+    (void)storage;
+    (void)cache_line_size;
+    //init_ptrchase_scaling();
 }
 
 bool LatencyMeasurer::measure_latency_with_bursts(int burst_count, PerfBurstCounters& totals, double& total_accesses) {
@@ -93,7 +93,6 @@ bool LatencyMeasurer::measure_latency_with_bursts(int burst_count, PerfBurstCoun
         return false;
     }
 
-    // Initialize the output totals struct
     totals = {0, 0, 0, 0, 0, false, "", ""};
     total_accesses = 0.0;
 
@@ -519,4 +518,3 @@ void LatencyMeasurer::reset() {
     }
     burst_running_ = false;
 }
-

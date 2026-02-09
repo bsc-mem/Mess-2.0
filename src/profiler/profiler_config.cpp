@@ -154,6 +154,7 @@ void print_profiler_help(const char* prog_name) {
               << "\n"
               << "Other Options:\n"
               << "  --dry, --dry-run        Dry run: show detected counters and exit.\n"
+              << "  --profet                Add profet counters (cycles,instructions,longest-lat-cache-miss alias auto-detected).\n"
               << "  -h, --help              Show this help.\n"
               << "\n"
               << "Examples:\n"
@@ -167,5 +168,5 @@ void print_profiler_help(const char* prog_name) {
               << "Counter Units:\n"
               << "  CAS_COUNT:    Raw values = cache line accesses (typically 64B each)\n"
               << "  UPI_FLITS:    Raw values = flit counts (cross-socket traffic)\n"
-              << "  NVIDIA_GRACE: Read = 32-byte data beats, Write = bytes\n";
+              << "  NVIDIA_GRACE: Read = 32-byte beats (cmem_rd_data*32), Write = bytes (cmem_wr_total_bytes)\n";
 }

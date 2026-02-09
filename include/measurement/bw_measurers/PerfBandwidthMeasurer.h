@@ -45,8 +45,11 @@ public:
     bool wait_for_stabilization(int& samples_collected, long long& bw_cas_rd, long long& bw_cas_wr, double& bw_elapsed, int pause, int ratio_pct, bool reuse_existing_traffic_gen, std::function<void()> on_sample_callback = nullptr) override;
 
     bool monitor_command(const std::string& command, 
-                         std::function<void(double timestamp, double bw_gbps, long long raw_rd, long long raw_wr)> callback, 
+                         MonitorCallback callback,
                          bool summary_mode) override;
+
+private:
+    bool sample_with_popen(long long& cas_rd, long long& cas_wr, double& elapsed, const std::vector<int>& mem_nodes) const;
 };
 
 #endif

@@ -32,16 +32,58 @@
  */
 
 #include "measurement.h"
+#include "architecture/ArchitectureRegistry.h"
+#include "architecture/BandwidthCounterStrategy.h"
 #include "utils.h"
 
-BandwidthMeasurer::BandwidthMeasurer(const BenchmarkConfig& config, const system_info& sys_info, MeasurementStorage* storage, TrafficGenProcessManager* traffic_gen_manager, std::function<std::vector<int>()> numa_resolver, ExecutionMode mode)
+BandwidthMeasurer::BandwidthMeasurer(const BenchmarkConfig& config, const system_info& sys_info, const CPUCapabilities& caps, MeasurementStorage* storage, TrafficGenProcessManager* traffic_gen_manager, std::function<std::vector<int>()> numa_resolver, ExecutionMode mode)
     : config_(config),
       sys_info_(sys_info),
+      caps_(caps),
       storage_(storage),
       traffic_gen_manager_(traffic_gen_manager),
       numa_resolver_(std::move(numa_resolver)),
       mode_(mode),
-      sampling_interval_ms_(50.0) {}
+      sampling_interval_ms_(50.0) {
+    if (sys_info_.socket_count > 0 && sys_info_.sockets[0].cache_count > 0) {
+        cached_cache_line_size_ = sys_info_.sockets[0].caches[0].line_size_bytes;
+    }
+}
+
+double BandwidthMeasurer::calculate_bandwidth_gbps(long long cas_rd, long long cas_wr, double elapsed_s,
+                                                    CounterType type, int cache_line_size, double scaling_factor) {
+    if (elapsed_s <= 0) return 0.0;
+
+    if (type == CounterType::NVIDIA_GRACE) {
+        double bytes_rd = static_cast<double>(cas_rd) * 32.0;
+        double bytes_wr = static_cast<double>(cas_wr);
+        return (bytes_rd + bytes_wr) / (elapsed_s * 1e9);
+    }
+
+    return (cas_rd + cas_wr) * cache_line_size * scaling_factor / (elapsed_s * 1e9);
+}
+
+void BandwidthMeasurer::ensure_scaling_factor_cached() const {
+    if (scaling_factor_initialized_) return;
+    scaling_factor_initialized_ = true;
+    
+    if (counter_selection_.type == CounterType::UPI_FLITS) {
+        auto arch = ArchitectureRegistry::instance().getArchitecture(caps_);
+        if (arch) {
+            const_cast<BandwidthMeasurer*>(this)->cached_scaling_factor_ = arch->getUpiScalingFactor(caps_);
+        } else {
+            const_cast<BandwidthMeasurer*>(this)->cached_scaling_factor_ = 1.0;
+        }
+    }
+}
+
+int BandwidthMeasurer::get_traffic_gen_cores() const {
+    int cores = sys_info_.sockets[0].core_count - 1;
+    if (config_.traffic_gen_cores > 0 && config_.traffic_gen_cores <= sys_info_.sockets[0].core_count - 1) {
+        cores = config_.traffic_gen_cores;
+    }
+    return cores;
+}
 
 bool BandwidthMeasurer::relaunch_traffic_gen(int ratio, int pause, int traffic_gen_cores) {
     if (!traffic_gen_manager_) {

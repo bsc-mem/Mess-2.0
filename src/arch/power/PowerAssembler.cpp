@@ -47,7 +47,8 @@ std::string PowerAssembler::generateStore(int offset, int reg) const {
     return oss.str();
 }
 
-std::string PowerAssembler::generateLoopControl([[maybe_unused]] int increment, int labelId) const {
+std::string PowerAssembler::generateLoopControl(int increment, int labelId) const {
+    (void)increment;
     std::ostringstream oss;
     oss << "\n        \"bdnz .L_" << labelId << ";\\n\"\n";
     return oss.str();
@@ -86,7 +87,7 @@ std::string PowerAssembler::generatePointerChaseBurstLoop() const {
         register uint64_t tmp;
 
         __asm__ __volatile__ (
-            "start_loop_%=:"
+            "start_loop_%=:!"
             #include "loop.h"
             "addi %0, %0, -1;"
             "cmpdi %0, 0;"
@@ -100,4 +101,33 @@ std::string PowerAssembler::generatePointerChaseBurstLoop() const {
 )";
 }
 
+
+std::string PowerAssembler::generateNopFile() const {
+    return R"(#include <stdlib.h>
+#include <stdio.h>
+
+extern "C" void volatile nop_(void) {
+    asm __volatile__ (
+        "cmpli 0, 1, 4, 0;\n"
+        "bne start_pause;\n"
+        "b end;\n"
+        "start_pause:"
+        "start_loop2:\n"
+        "nop;\n"
+        "addi 4, 4, -0x01;\n"
+        "cmpli 0, 1, 4, 0x00;\n"
+        "bne start_loop2;\n"
+        "end:"
+        :
+        :
+        : "4", "10"
+    );
+}
+
+int nop(int *ntimes) {
+    return 0;
+}
+)";
+
+}
 

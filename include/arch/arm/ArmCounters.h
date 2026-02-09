@@ -34,19 +34,15 @@
 #ifndef ARM_COUNTERS_H
 #define ARM_COUNTERS_H
 
-#include "architecture/PerformanceCounterStrategy.h"
+#include "architecture/BandwidthCounterStrategy.h"
 #include "system_detection.h"
 #include <string>
 
-class ArmCounters : public PerformanceCounterStrategy {
+class ArmCounters : public BandwidthCounterStrategy {
 public:
     explicit ArmCounters(const CPUCapabilities& caps);
     CasCounterSelection detectCasCounters() override;
     void getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) override;
-private:
-    std::string model_lower_;
-    CPUVendor vendor_;
-    bool modelContains(const std::string& token) const;
 };
 
 #endif

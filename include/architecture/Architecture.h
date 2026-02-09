@@ -43,8 +43,7 @@
 
 class ISA;
 class KernelAssembler;
-class PerformanceCounterStrategy;
-class NopGenerator;
+class BandwidthCounterStrategy;
 
 class Architecture {
 public:
@@ -54,13 +53,13 @@ public:
     virtual bool supports(const CPUCapabilities& caps) const = 0;
 
     virtual std::unique_ptr<KernelAssembler> createAssembler(const KernelConfig& config) const = 0;
-    virtual std::unique_ptr<PerformanceCounterStrategy> createCounterStrategy(const CPUCapabilities& caps) const = 0;
+    virtual std::unique_ptr<BandwidthCounterStrategy> createCounterStrategy(const CPUCapabilities& caps) const = 0;
     
     virtual std::vector<std::shared_ptr<ISA>> getSupportedISAs() const = 0;
     virtual std::shared_ptr<ISA> selectBestISA(const CPUCapabilities& caps) const = 0;
     
-    virtual std::string generateNopFile() const = 0;
-
+    // Returns multiplier to convert raw interconnect units to cache-line-equivalent traffic.
+    // For local-memory counters this should normally be 1.0.
     virtual double getUpiScalingFactor(const CPUCapabilities& caps) const = 0;
 };
 

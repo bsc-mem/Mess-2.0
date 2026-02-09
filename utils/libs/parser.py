@@ -38,7 +38,7 @@ def csv_to_json_compact(
             f.write(f"    ]{end_comma}\n")
         f.write("}\n")
 
-    print(f"Done — wrote {len(groups)} groups to {output_json}")
+    #print(f"Done — wrote {len(groups)} groups to {output_json}")
 
 
 
@@ -252,9 +252,11 @@ def parse_bandwidth_file(filepath, config, rd_percentage_from_filename=None):
             
             return measurements
         else:
-            print(f"  Missing or mismatched data in {filepath}: rd={len(rd_counts)}, wr={len(wr_counts)}, time={len(runtimes)}, combined={len(combined_counts)}")
+            #print(f"  Missing or mismatched data in {filepath}: rd={len(rd_counts)}, wr={len(wr_counts)}, time={len(runtimes)}, combined={len(combined_counts)}")
+            pass
     except Exception as e:
-        print(f"Error parsing {filepath}: {e}")
+        #print(f"Error parsing {filepath}: {e}")
+        pass
     
     return None
 
@@ -357,7 +359,7 @@ def parse_latency_file(filepath, config):
                     try:
                         tlb_hit_latency_ns = float(config.get('TLB_NS', 10.0))
                     except (ValueError, TypeError):
-                        print("Warning: Invalid TLB_NS in config, using default 10.0ns")
+                        #print("Warning: Invalid TLB_NS in config, using default 10.0ns")
                         tlb_hit_latency_ns = 10.0
                     
                     total_ns = seconds_user * 1e9
@@ -385,10 +387,10 @@ def parse_latency_file(filepath, config):
         if measurements:
             return measurements
         else:
-            print(f"  No complete measurements found in {filepath}")
+            #print(f"  No complete measurements found in {filepath}")
             return None
     except Exception as e:
-        print(f"Error parsing {filepath}: {e}")
+        #print(f"Error parsing {filepath}: {e}")
         return None
     return None
 
@@ -420,9 +422,11 @@ def parse_bwlat_file(filepath, config):
         if data_points:
             return data_points
         else:
-            print(f"  No valid data found in {filepath}")
+            #print(f"  No valid data found in {filepath}")
+            pass
     except Exception as e:
-        print(f"Error parsing {filepath}: {e}")
+        #print(f"Error parsing {filepath}: {e}")
+        pass
     
     return None
 
@@ -441,6 +445,7 @@ def parse_filename(filename):
             pause = int(parts[2])
             return rd_percentage, pause
         except (ValueError, IndexError) as e:
-            print(f"    Error parsing parts: {e}")
+            #print(f"    Error parsing parts: {e}")
+            pass
     
     return None, None

@@ -52,6 +52,9 @@ public:
     void increment_completed_iterations();
     void reset_completed_iterations(int count) { completed_iterations_ = count; }
     int completed_iterations() const { return completed_iterations_; }
+    
+    void update_estimated_total(int new_total) { total_global_iterations_ = new_total; }
+    int estimated_total() const { return total_global_iterations_; }
 
     std::string format_progress(int completed,int total_measurements,int remaining_iterations) const;
     

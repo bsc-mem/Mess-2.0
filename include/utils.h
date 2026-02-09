@@ -40,7 +40,7 @@
 #include <vector>
 #include <cstdlib>
 #include <sys/wait.h>
-#include "architecture/PerformanceCounterStrategy.h"
+#include "architecture/BandwidthCounterStrategy.h"
 #include "system_detection.h"
 #include <filesystem>
 
@@ -131,5 +131,7 @@ private:
     static CasCounterSelection detect_perf_cas_counters();
     static std::vector<std::string> extract_cas_events_from_perf();
 };
+
+uint64_t calculate_traffic_gen_array_size(uint64_t l3_size_bytes);
 
 #endif

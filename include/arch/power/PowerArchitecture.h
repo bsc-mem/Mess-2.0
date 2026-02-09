@@ -45,14 +45,12 @@ public:
     }
 
     std::unique_ptr<KernelAssembler> createAssembler(const KernelConfig& config) const override;
-    std::unique_ptr<PerformanceCounterStrategy> createCounterStrategy(const CPUCapabilities& caps) const override;
+    std::unique_ptr<BandwidthCounterStrategy> createCounterStrategy(const CPUCapabilities& caps) const override;
     
     std::vector<std::shared_ptr<ISA>> getSupportedISAs() const override;
     std::shared_ptr<ISA> selectBestISA(const CPUCapabilities& caps) const override;
-    
-    std::string generateNopFile() const override;
 
-    double getUpiScalingFactor(const CPUCapabilities& caps) const override;
+    double getUpiScalingFactor(const CPUCapabilities&) const override;
 };
 
 #endif
