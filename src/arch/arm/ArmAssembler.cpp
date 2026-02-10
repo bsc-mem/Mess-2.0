@@ -90,9 +90,10 @@ std::string ArmAssembler::generateLoopControl(int increment, int labelId) const 
 }
 
 std::string ArmAssembler::generatePause() const {
-    return "        \"mov x22, x30;\\n\"\n"
+    return "        \"mov x4, %3;\\n\"\n"
+           "        \"mov x11, x30;\\n\"\n"
            "        \"bl  nop_;\\n\"\n"
-           "        \"mov x30, x22;\\n\"\n";
+           "        \"mov x30, x11;\\n\"\n";
 }
 
 std::string ArmAssembler::generateHeader() const {
@@ -138,12 +139,12 @@ std::string ArmAssembler::generateAsmEnd() const {
     if (config_.isa_mode == ISAMode::SVE) {
         return "      :\n"
                "      : \"r\" (a_array), \"r\" (i), \"r\" (*array_size), \"r\" (*pause), \"r\" (b_array)\n"
-               "      : \"x9\", \"x19\", \"x20\", \"x21\", \"x22\", \"x30\", \"z0\", \"p0\", \"memory\", \"cc\"\n"
+               "      : \"x4\", \"x9\", \"x10\", \"x11\", \"x19\", \"x20\", \"x21\", \"x22\", \"x30\", \"z0\", \"p0\", \"memory\", \"cc\"\n"
                "    );\n";
     }
     return "      :\n"
            "      : \"r\" (a_array), \"r\" (i), \"r\" (*array_size), \"r\" (*pause), \"r\" (b_array)\n"
-           "      : \"x9\", \"x19\", \"x20\", \"x21\", \"x22\", \"x30\", \"q0\", \"q1\", \"memory\", \"cc\"\n"
+           "      : \"x4\", \"x9\", \"x10\", \"x11\", \"x19\", \"x20\", \"x21\", \"x22\", \"x30\", \"q0\", \"q1\", \"memory\", \"cc\"\n"
            "    );\n";
 }
 
