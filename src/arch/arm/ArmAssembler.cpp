@@ -80,18 +80,13 @@ std::string ArmAssembler::generateLoopControl(int increment, int labelId) const 
     oss << "\n"
         << safe_add("x21", loopIncrement);
 
-    if (config_.isa_mode == ISAMode::SVE) {
-        oss << "        \"cmp x21, x22;\\n\"\n";
-    } else {
-        oss << "        \"cmp x21, %2;\\n\"\n";
-    }
+    oss << "        \"cmp x21, x22;\\n\"\n";
     oss << "        \"blt ..L_" << labelId << ";\\n\"\n";
     return oss.str();
 }
 
 std::string ArmAssembler::generatePause() const {
-    return "        \"mov x4, %3;\\n\"\n"
-           "        \"mov x11, x30;\\n\"\n"
+    return "        \"mov x11, x30;\\n\"\n"
            "        \"bl  nop_;\\n\"\n"
            "        \"mov x30, x11;\\n\"\n";
 }
@@ -130,21 +125,23 @@ std::string ArmAssembler::generateFooter() const {
 
 std::string ArmAssembler::generateAsmStart() const {
     return "    asm __volatile__ (\n"
-           "      \"mov x21, #0x0;\\n\"\n" 
-           "      \"mov x19, %0;\\n\"\n"   
-           "      \"mov x20, %4;\\n\"";    
+           "      \"mov x21, #0x0;\\n\"\n"
+           "      \"mov x19, %0;\\n\"\n"
+           "      \"mov x20, %4;\\n\"\n"
+           "      \"mov x22, %2;\\n\"\n"
+           "      \"mov x4, %3;\\n\"";
 }
 
 std::string ArmAssembler::generateAsmEnd() const {
     if (config_.isa_mode == ISAMode::SVE) {
         return "      :\n"
                "      : \"r\" (a_array), \"r\" (i), \"r\" (*array_size), \"r\" (*pause), \"r\" (b_array)\n"
-               "      : \"x4\", \"x9\", \"x10\", \"x11\", \"x19\", \"x20\", \"x21\", \"x22\", \"x30\", \"z0\", \"p0\", \"memory\", \"cc\"\n"
+               "      : \"x0\", \"x1\", \"x2\", \"x3\", \"x4\", \"x5\", \"x6\", \"x7\", \"x8\", \"x9\", \"x10\", \"x11\", \"x12\", \"x13\", \"x14\", \"x15\", \"x16\", \"x17\", \"x18\", \"x19\", \"x20\", \"x21\", \"x22\", \"x30\", \"z0\", \"p0\", \"memory\", \"cc\"\n"
                "    );\n";
     }
     return "      :\n"
            "      : \"r\" (a_array), \"r\" (i), \"r\" (*array_size), \"r\" (*pause), \"r\" (b_array)\n"
-           "      : \"x4\", \"x9\", \"x10\", \"x11\", \"x19\", \"x20\", \"x21\", \"x22\", \"x30\", \"q0\", \"q1\", \"memory\", \"cc\"\n"
+           "      : \"x0\", \"x1\", \"x2\", \"x3\", \"x4\", \"x5\", \"x6\", \"x7\", \"x8\", \"x9\", \"x10\", \"x11\", \"x12\", \"x13\", \"x14\", \"x15\", \"x16\", \"x17\", \"x18\", \"x19\", \"x20\", \"x21\", \"x22\", \"x30\", \"q0\", \"q1\", \"memory\", \"cc\"\n"
            "    );\n";
 }
 
