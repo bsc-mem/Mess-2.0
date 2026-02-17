@@ -108,7 +108,7 @@ bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_
     int samples_read = 0;
     int total_samples_seen = 0;
     const int samples_to_read = 2;
-    const int warmup_samples = 0;
+    const int warmup_samples = 1;
     bool using_combined = selection.cas.has_combined_counter && !selection.cas.has_read_write;
 
     while (samples_read < samples_to_read && fgets(buffer, sizeof(buffer), pipe)) {

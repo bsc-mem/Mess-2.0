@@ -183,9 +183,30 @@ std::string LikwidBandwidthMeasurer::build_event_string(const std::string& likwi
         if (has_core_clk) eventString << "CPU_CLK_UNHALTED_CORE:FIXC1,";
         if (has_ref_clk) eventString << "CPU_CLK_UNHALTED_REF:FIXC2,";
 
-        for (const auto& channel : channels) {
-            eventString << "CAS_COUNT_RD:" << channel.readCounter << ",";
-            eventString << "CAS_COUNT_WR:" << channel.writeCounter << ",";
+        std::set<int> schIndices;
+        std::regex schRegex(R"(CAS_COUNT_SCH(\d+)_RD,)");
+        std::sregex_iterator schIter(output.begin(), output.end(), schRegex);
+        std::sregex_iterator schEnd;
+        while (schIter != schEnd) {
+            schIndices.insert(std::stoi((*schIter)[1].str()));
+            ++schIter;
+        }
+
+        if (!schIndices.empty()) {
+            for (const auto& channel : channels) {
+                std::string mboxBase = channel.readCounter.substr(0, channel.readCounter.find('C'));
+                for (int sch : schIndices) {
+                    int rdCIdx = sch * 2;
+                    int wrCIdx = sch * 2 + 1;
+                    eventString << "CAS_COUNT_SCH" << sch << "_RD:" << mboxBase << "C" << rdCIdx << ",";
+                    eventString << "CAS_COUNT_SCH" << sch << "_WR:" << mboxBase << "C" << wrCIdx << ",";
+                }
+            }
+        } else {
+            for (const auto& channel : channels) {
+                eventString << "CAS_COUNT_RD:" << channel.readCounter << ",";
+                eventString << "CAS_COUNT_WR:" << channel.writeCounter << ",";
+            }
         }
     }
     
@@ -259,6 +280,10 @@ void LikwidBandwidthMeasurer::parse_likwid_header(const std::string& line, Count
                 wrIndices.push_back(colIndex);
             } else if (token.find("DATA_FROM_LOCAL_DRAM") != std::string::npos) {
                 rdIndices.push_back(colIndex);
+            } else if (token.find("CAS_COUNT_SCH") != std::string::npos && token.find("_RD") != std::string::npos) {
+                rdIndices.push_back(colIndex);
+            } else if (token.find("CAS_COUNT_SCH") != std::string::npos && token.find("_WR") != std::string::npos) {
+                wrIndices.push_back(colIndex);
             }
         }
         colIndex++;
