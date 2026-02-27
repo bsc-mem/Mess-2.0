@@ -71,6 +71,8 @@ bool PerfBandwidthMeasurer::sample_bandwidth(long long& cas_rd, long long& cas_w
 }
 
 bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_wr, double& elapsed, const std::vector<int>& mem_nodes) const {
+    const bool verbose4 = config_.verbosity >= 4;
+
     int interval = static_cast<int>(sampling_interval_ms_);
     
     const std::string membind_arg = make_membind_arg(mem_nodes);
@@ -86,12 +88,14 @@ bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_
         return false;
     }
 
-    std::string events_str = selection.get_bw_events_string();
+    std::string events_str = selection.get_all_events_string();
 
     std::string cmd = std::string("cd ") + storage_->bandwidth_dir() +
                       " && stdbuf -oL -eL numactl -C 0 --membind=" + membind_arg +
                       " perf stat -I " + std::to_string(interval) +
                       " -a --per-socket -x, -e " + events_str + " 2>&1";
+
+    if(verbose4){std::cout << "[SAMPLING CMD] " << cmd << '\n';}
 
     FILE* pipe = popen(cmd.c_str(), "r");
     if (!pipe) {
@@ -102,6 +106,8 @@ bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_
 
     char buffer[4096];
     long long current_sample_rd = 0, current_sample_wr = 0, current_sample_combined = 0;
+    std::map<std::string, long long> current_extra;
+    std::map<std::string, long long> sum_extra;
     long long sum_rd = 0, sum_wr = 0, sum_combined = 0;
     double last_timestamp = -1.0;
     double accumulated_time = 0.0;
@@ -142,12 +148,16 @@ bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_
                     sum_rd += current_sample_rd;
                     sum_wr += current_sample_wr;
                     sum_combined += current_sample_combined;
+                    for (const auto& kv : current_extra) {
+                        sum_extra[kv.first] += kv.second;
+                    }    
                     accumulated_time += duration;
                     samples_read++;
                 }
                 current_sample_rd = 0;
                 current_sample_wr = 0;
                 current_sample_combined = 0;
+                EventClassification::reset_extra_values(current_extra);
                 if (samples_read >= samples_to_read) {
                     break;
                 }
@@ -155,14 +165,21 @@ bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_
 
             EventClassification ec = EventClassification::classify(event_name, selection);
 
+            if (verbose4) {
+                std::cout << "      [SAMPPLING EVENT] " << event_name << " -> rd:" << ec.is_read 
+                          << " wr:" << ec.is_write << " comb:" << ec.is_combined << " extra: " << ec.is_extra
+                          << " val:" << value << '\n';
+            }
+
             if (ec.is_combined) {
                 current_sample_combined += value;
             } else if (ec.is_read) {
                 current_sample_rd += value;
             } else if (ec.is_write) {
                 current_sample_wr += value;
+            } else if (ec.is_extra) {
+                EventClassification::accumulate_extra(current_extra, ec.extra_key, value);
             }
-
             last_timestamp = timestamp;
         }
     }
@@ -174,6 +191,9 @@ bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_
         sum_rd += current_sample_rd;
         sum_wr += current_sample_wr;
         sum_combined += current_sample_combined;
+        for (const auto& kv : current_extra) {
+            sum_extra[kv.first] += kv.second;
+        }
         samples_read++;
     }
 
@@ -195,6 +215,9 @@ bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_
             cas_wr = sum_wr;
         }
         elapsed = accumulated_time;
+        for (const auto& kv : sum_extra) {
+            extra_perf_values_[kv.first] = kv.second;
+        }
         return true;
     }
 
@@ -284,7 +307,7 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                   << "BandwidthCounterStrategy must be initialized first." << std::endl;
         return false;
     }
-    std::string events_str = selection.get_all_events_string();
+    std::string events_str = selection.get_bw_events_string();
 
     std::string cmd = std::string("cd ") + storage_->bandwidth_dir() +
                       " && stdbuf -oL -eL numactl -C 0 --membind=" + membind_arg +
@@ -318,10 +341,6 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
 
     long long final_cas_rd = 0, final_cas_wr = 0;
     double final_elapsed = sampling_interval_ms_ / 1000.0;
-
-    std::map<std::string, long long> sample_extra_counters;
-    std::map<std::string, long long> aggregate_extra_counters;
-    extra_perf_values_.clear();
 
     auto loop_start = std::chrono::steady_clock::now();
     const int READ_TIMEOUT_SECONDS = 10;
@@ -481,10 +500,6 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                         return false;
                     }
 
-                    for (const auto& kv : sample_extra_counters) {
-                        aggregate_extra_counters[kv.first] += static_cast<long long>(kv.second * normalization_factor);
-                    }
-
                     if (verbose3) {
                         double read_ratio = 0.0;
                         if (selection.type == CounterType::NVIDIA_GRACE) {
@@ -527,7 +542,6 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                 }
                 sample_cas_rd = 0;
                 sample_cas_wr = 0;
-                EventClassification::reset_extra_values(sample_extra_counters);
             }
 
             EventClassification ec = EventClassification::classify(event_name, selection);
@@ -538,9 +552,7 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                           << " val:" << value << '\n';
             }
 
-            if (ec.is_extra) {
-                EventClassification::accumulate_extra(sample_extra_counters, ec.extra_key, value);
-            } else if (ec.is_combined || ec.is_read) {
+            if (ec.is_combined || ec.is_read) {
                 sample_cas_rd += value;
             } else if (ec.is_write) {
                 sample_cas_wr += value;
@@ -563,10 +575,6 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
         last_cas_rd = aggregate_cas_rd;
         last_cas_wr = aggregate_cas_wr;
         last_elapsed = samples.size() * (sampling_interval_ms_ / 1000.0);
-
-        for (const auto& kv : aggregate_extra_counters) {
-            extra_perf_values_[kv.first] = kv.second;
-        }
 
         if (verbose3) {
              std::cout << "      [BW AGGREGATE] Using " << samples.size()

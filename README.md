@@ -289,6 +289,9 @@ Mess is developed by the **[Memory Systems Team](https://memory.bsc.es)** at the
       <sub><b>Mariana Carmin</b><br/>Mess 2.0 developer<br/><a href="mailto:mcarmin@bsc.es">mcarmin@bsc.es</a></sub>
     </td>
     <td align="center" width="160" style="vertical-align: top;">
+      <sub><b>Pau Diaz</b><br/>Mess 2.0 developer<br/><a href="mailto:pau.diazcuesta@bsc.es">pau.diazcuesta@bsc.es</a></sub>
+    </td>
+    <td align="center" width="160" style="vertical-align: top;">
       <sub><b>Pouya Esmaili Dokht</b><br/>Mess Paper author<br/><a href="mailto:pouya.esmaili@bsc.es">pouya.esmaili@bsc.es</a></sub>
     </td>
   </tr>

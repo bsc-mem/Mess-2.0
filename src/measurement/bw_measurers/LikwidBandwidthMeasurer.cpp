@@ -43,6 +43,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <string>
 #include <thread>
 #include <deque>
 #include <regex>
@@ -120,6 +121,252 @@ std::vector<LikwidBandwidthMeasurer::UpiChannel> LikwidBandwidthMeasurer::parse_
     }
     
     return channels;
+}
+
+std::vector<LikwidBandwidthMeasurer::ResolvedExtraEvent> LikwidBandwidthMeasurer::resolve_extra_counters(const std::string& likwidCmd, const std::string& bwEventString) const {
+
+    if (extras_resolved_ && cached_bw_event_string_ == bwEventString) {
+        return cached_resolved_extras_;
+    }
+
+    const bool verbose3 = config_.verbosity >= 3;
+    const bool verbose4 = config_.verbosity >= 4;
+
+    std::set<std::string> usedRegisters;
+    {
+        std::regex regRegex(R"(:([A-Za-z]+\d+C\d+))");
+        std::sregex_iterator iter(bwEventString.begin(), bwEventString.end(), regRegex);
+        std::sregex_iterator end;
+        while (iter != end) {
+            usedRegisters.insert((*iter)[1].str());
+            ++iter;
+        }
+    }
+
+    if (verbose4) {
+        std::cout << "[LIKWID] Used registers from BW events:";
+        for (const auto& r : usedRegisters) std::cout << " " << r;
+        std::cout << std::endl;
+    }
+
+    std::vector<ResolvedExtraEvent> results;
+
+    for (const auto& eventName : counter_selection_.extra_counters) {
+        if (eventName.empty()) continue;
+
+        ResolvedExtraEvent resolved;
+        resolved.eventName = eventName;
+
+        std::string command = "\"" + likwidCmd + "\" -E " + eventName + " 2>&1";
+        FILE* pipe = popen(command.c_str(), "r");
+        if (!pipe) {
+            if (verbose3) {
+                std::cerr << "    Warning: Failed to run likwid-perfctr -E " << eventName << std::endl;
+            }
+            continue;
+        }
+
+        std::string output;
+        char buffer[4096];
+        while (fgets(buffer, sizeof(buffer), pipe)) {
+            output += buffer;
+        }
+        pclose_success(pipe);
+
+        std::regex foundRegex(R"(Found\s+(\d+)\s+event\(s\))");
+        std::smatch foundMatch;
+        if (std::regex_match(output, foundMatch, foundRegex)) {
+            int numEvents = std::stoi(foundMatch[1].str());
+            if (numEvents > 1) {
+                if (verbose3) {
+                    std::cerr << "    Warning: Ambiguous event name '" << eventName
+                                << "' matched " << numEvents << " events. "
+                                << "Please use a more specific event name. Skipping." << std::endl;
+                }
+                continue;
+            } else if (numEvents == 0) {
+                if (verbose3) {
+                    std::cerr << "    Warning: No events found for event name '" << eventName
+                                << "'. Please use an existing event name. Skipping." << std::endl;
+                }
+                continue;
+            }
+        }
+
+        std::string boxType;
+        
+        std::istringstream iss(output);
+        std::string line;
+        while (std::getline(iss, line)) {
+            if (line.find(eventName) != std::string::npos && line.find(',') != std::string::npos) {
+                std::stringstream lineStream(line);
+                std::string field;
+                int fieldIdx = 0;
+                while (std::getline(lineStream, field, ',')) {
+                    auto start = field.find_first_not_of(" \t");
+                    auto end_pos = field.find_last_not_of(" \t\r\n");
+                    if (start != std::string::npos && end_pos != std::string::npos) {
+                        field = field.substr(start, end_pos - start + 1);
+                    }
+                    if (fieldIdx == 3) {
+                        boxType = field;
+                        
+                        if (boxType.find('|') != std::string::npos) {
+                            auto [targetMemType, _] = determine_memory_type();
+                            std::stringstream pPipe(boxType);
+                            std::string opt;
+                            bool found_match = false;
+                            std::string first_opt;
+                            bool is_first = true;
+                            while (std::getline(pPipe, opt, '|')) {
+                                if (is_first) {
+                                    first_opt = opt;
+                                    is_first = false;
+                                }
+                                if (opt == targetMemType) {
+                                    boxType = opt;
+                                    found_match = true;
+                                    break;
+                                }
+                            }
+                            if (!found_match) {
+                                boxType = first_opt;
+                            }
+                        }
+                        break;
+                    }
+                    fieldIdx++;
+                }
+                if (!boxType.empty()) break;
+            }
+        }
+
+        if (boxType.empty()) {
+            if (verbose3) {
+                std::cerr << "    Warning: Could not determine box type for event " << eventName << std::endl;
+            }
+            continue;
+        }
+        resolved.boxType = boxType;
+
+        if (verbose3) {
+            std::cout << "[LIKWID] Event " << eventName << " -> box type: " << boxType << std::endl;
+        }
+
+        std::set<int> boxInstances;
+        bool isBoxType = false;
+        {
+            std::regex counterRegex("(" + boxType + R"((\d+)C(\d+)))");
+            std::sregex_iterator iter(output.begin(), output.end(), counterRegex);
+            std::sregex_iterator end;
+            while (iter != end) {
+                int boxIdx = std::stoi((*iter)[2].str());
+                boxInstances.insert(boxIdx);
+                ++iter;
+            }
+            isBoxType = !boxInstances.empty();
+        }
+
+        std::set<int> flatCounterIndices;
+        if (!isBoxType) {
+            std::regex flatRegex("\\b" + boxType + R"((\d+)\b)");
+            std::sregex_iterator iter(output.begin(), output.end(), flatRegex);
+            std::sregex_iterator end;
+            while (iter != end) {
+                int idx = std::stoi((*iter)[1].str());
+                flatCounterIndices.insert(idx);
+                ++iter;
+            }
+        }
+
+        if (boxInstances.empty() && flatCounterIndices.empty()) {
+            if (verbose3) {
+                std::cerr << "    Warning: No usable counters found for event " << eventName
+                          << " (box type: " << boxType << ")" << std::endl;
+            }
+            continue;
+        }
+
+        if (isBoxType) {
+            if (verbose3) {
+                std::cout << "[LIKWID] Event " << eventName << ": found "
+                          << boxInstances.size() << " " << boxType << " instances (box-type)" << std::endl;
+            }
+
+            int targetCn = -1;
+            for (int cn = 0; cn <= 3; cn++) {
+                bool conflict = false;
+                for (int boxIdx : boxInstances) {
+                    std::string testReg = boxType + std::to_string(boxIdx) + "C" + std::to_string(cn);
+                    if (usedRegisters.count(testReg)) {
+                        conflict = true;
+                        break;
+                    }
+                }
+                if (!conflict) {
+                    targetCn = cn;
+                    break;
+                }
+            }
+
+            if (targetCn < 0) {
+                if (verbose3) {
+                    std::cerr << "    Warning: No free counter register (C0-C3) for event " << eventName
+                              << " on " << boxType << " (all in use)" << std::endl;
+                }
+                continue;
+            }
+
+            if (verbose3) {
+                std::cout << "[LIKWID] Event " << eventName << ": using C" << targetCn
+                          << " across " << boxInstances.size() << " " << boxType << " instances" << std::endl;
+            }
+
+            for (int boxIdx : boxInstances) {
+                std::string reg = boxType + std::to_string(boxIdx) + "C" + std::to_string(targetCn);
+                resolved.resolvedStrings.push_back(eventName + ":" + reg);
+                usedRegisters.insert(reg);
+            }
+        } else {
+            if (verbose3) {
+                std::cout << "[LIKWID] Event " << eventName << ": found "
+                          << flatCounterIndices.size() << " " << boxType << " counters (flat-type)" << std::endl;
+            }
+
+            int targetIdx = -1;
+            for (int idx : flatCounterIndices) {
+                std::string testReg = boxType + std::to_string(idx);
+                if (!usedRegisters.count(testReg)) {
+                    targetIdx = idx;
+                    break;
+                }
+            }
+
+            if (targetIdx < 0) {
+                if (verbose3) {
+                    std::cerr << "    Warning: No free counter for event " << eventName
+                              << " on " << boxType << " (all " << flatCounterIndices.size()
+                              << " counters in use)" << std::endl;
+                }
+                continue;
+            }
+
+            std::string reg = boxType + std::to_string(targetIdx);
+            if (verbose3) {
+                std::cout << "[LIKWID] Event " << eventName << ": using " << reg << std::endl;
+            }
+
+            resolved.resolvedStrings.push_back(eventName + ":" + reg);
+            usedRegisters.insert(reg);
+        }
+
+        results.push_back(std::move(resolved));
+    }
+
+    cached_resolved_extras_ = results;
+    cached_bw_event_string_ = bwEventString;
+    extras_resolved_ = true;
+    return results;
 }
 
 std::string LikwidBandwidthMeasurer::build_event_string(const std::string& likwidCmd, const std::string& memType, CounterType type) const {
@@ -244,10 +491,10 @@ std::pair<std::string, CounterType> LikwidBandwidthMeasurer::determine_memory_ty
     return {memType, type};
 }
 
-void LikwidBandwidthMeasurer::parse_likwid_header(const std::string& line, CounterType type,
-                                                   std::vector<int>& rdIndices, std::vector<int>& wrIndices) const {
+void LikwidBandwidthMeasurer::parse_likwid_header(const std::string& line, CounterType type, std::vector<int>& rdIndices, std::vector<int>& wrIndices, std::map<std::string, std::vector<int>>& extraIndices) const {
     rdIndices.clear();
     wrIndices.clear();
+    extraIndices.clear();
     
     std::stringstream ss(line);
     std::string token;
@@ -291,6 +538,9 @@ void LikwidBandwidthMeasurer::parse_likwid_header(const std::string& line, Count
 }
 
 bool LikwidBandwidthMeasurer::sample_bandwidth(long long& cas_rd, long long& cas_wr, double& elapsed, const std::vector<int>& /*mem_nodes*/) const {
+    
+    const bool verbose4 = config_.verbosity >= 4;
+
     std::string likwidCmd = find_likwid_binary();
     if (likwidCmd.empty()) {
         std::cerr << "Error: likwid-perfctr not found." << std::endl;
@@ -312,6 +562,8 @@ bool LikwidBandwidthMeasurer::sample_bandwidth(long long& cas_rd, long long& cas
     sleep_ss << std::fixed << std::setprecision(3) << sleep_sec;
     std::string cmd = "\"" + likwidCmd + "\" -f -c 0 -O -g " + eventString + " -t " + intervalStr + " sleep " + sleep_ss.str() + " 2>&1";
 
+    if(verbose4) std::cout << "[LIKWID] Likwid command: " << cmd << std::endl;
+
     FILE* pipe = popen(cmd.c_str(), "r");
     if (!pipe) return false;
 
@@ -327,11 +579,12 @@ bool LikwidBandwidthMeasurer::sample_bandwidth(long long& cas_rd, long long& cas
     bool found_data = false;
     std::vector<int> rdIndices;
     std::vector<int> wrIndices;
+    std::map<std::string, std::vector<int>> unusedExtraIndices;
     bool headerParsed = false;
 
     for (const auto& line : lines) {
         if (line.find("# GID|") != std::string::npos) {
-            parse_likwid_header(line, type, rdIndices, wrIndices);
+            parse_likwid_header(line, type, rdIndices, wrIndices, unusedExtraIndices);
             headerParsed = true;
         } else if (headerParsed && !line.empty() && std::isdigit(line[0])) {
             std::stringstream ss(line);
@@ -351,17 +604,150 @@ bool LikwidBandwidthMeasurer::sample_bandwidth(long long& cas_rd, long long& cas
         }
     }
 
-    if (found_data) {
-        cas_rd = total_rd;
-        cas_wr = total_wr;
-        elapsed = sleep_sec;
-        return true;
+    if (!found_data) {
+        return false;
     }
 
-    return false;
+    cas_rd = total_rd;
+    cas_wr = total_wr;
+    elapsed = sleep_sec;
+
+    extra_perf_values_.clear();
+    auto resolvedExtras = resolve_extra_counters(likwidCmd, "");
+
+    if (resolvedExtras.empty()) return true;
+
+    std::string extraEventString;
+    for (const auto& resolved : resolvedExtras) {
+        for (const auto& evStr : resolved.resolvedStrings) {
+            if (!extraEventString.empty()) extraEventString += ",";
+            extraEventString += evStr;
+        }
+    }
+    if(extraEventString.empty()) return true;
+
+    int socket_cores = (sys_info_.socket_count > 0) ? sys_info_.sockets[0].core_count : 0;
+
+    std::string extraCmd = "\"" + likwidCmd + "\" -f -c 1-" + std::to_string(socket_cores-1) + " -t " + intervalStr + " -O -g " + extraEventString
+                            + " sleep 3600 2>&1";
+    
+    if(verbose4) std::cout << "[EXTRA LIKWID] Extra Counters Likwid command: " << extraCmd << std::endl;
+
+    FILE* extraPipe = popen(extraCmd.c_str(), "r");
+
+    if(!extraPipe) return false;
+
+    setbuf(extraPipe, NULL);
+    
+    std::string header_line;
+    std::vector<std::string> data_lines;
+    std::string current_line;
+    
+    while (fgets(buffer, sizeof(buffer), extraPipe)) {
+        current_line += buffer;
+        
+        if (!current_line.empty() && current_line.back() != '\n' && !feof(extraPipe)) {
+            continue;
+        }
+        
+        if (current_line.empty() || current_line == "\n") {
+            current_line.clear();
+            continue;
+        }
+        
+        if (current_line.find("# GID|") != std::string::npos) {
+            header_line = current_line;
+        } else if (!header_line.empty() && std::isdigit(current_line[0])) {
+            data_lines.push_back(current_line);
+            if (data_lines.size() >= 2) {
+                break;
+            }
+        }
+        
+        current_line.clear();
+    }
+
+    pclose_success(extraPipe);
+
+    if (data_lines.size() >= 2 && !header_line.empty()) {
+        std::stringstream ss(header_line);
+        std::string token;
+        std::vector<std::string> header_cols;
+        while (std::getline(ss, token, '|')) {
+            token.erase(token.find_last_not_of(" \n\r\t") + 1);
+            token.erase(0, token.find_first_not_of(" \n\r\t"));
+            header_cols.push_back(token);
+        }
+        
+        std::stringstream ss_first(data_lines[0]);
+        std::vector<std::string> first_row_vals;
+        while (std::getline(ss_first, token, ',')) {
+            first_row_vals.push_back(token);
+        }
+        
+        std::stringstream ss_second(data_lines[1]);
+        std::vector<std::string> second_row_vals;
+        while (std::getline(ss_second, token, ',')) {
+            second_row_vals.push_back(token);
+        }
+        
+        if (first_row_vals.size() > 3 && second_row_vals.size() > 3 && header_cols.size() > 4) {
+            int cpu_count = std::stoi(first_row_vals[2]);
+            int n_event_cols = header_cols.size() - 4;
+            std::vector<std::string> unique_events;
+            std::map<std::string, int> event_header_counts;
+            
+            for (int h = 0; h < n_event_cols; ++h) {
+                std::string name = header_cols[4 + h];
+                if (event_header_counts.find(name) == event_header_counts.end()) {
+                    unique_events.push_back(name);
+                }
+                event_header_counts[name]++;
+            }
+            
+            double runtime1 = std::stod(first_row_vals[3]);
+            double runtime2 = std::stod(second_row_vals[3]);
+            double elapsed_runtime = runtime2 - runtime1;
+            if (elapsed_runtime <= 0) elapsed_runtime = sleep_sec;
+            
+            int csv_offset = 4;
+            for (const auto& ev : unique_events) {
+                int n_hdr_cols = event_header_counts[ev];
+                int n_csv_fields = n_hdr_cols * cpu_count;
+                
+                double event_sum = 0;
+                if (csv_offset + n_csv_fields <= static_cast<int>(first_row_vals.size()) && 
+                    csv_offset + n_csv_fields <= static_cast<int>(second_row_vals.size())) {
+                    
+                    for (int i = 0; i < n_csv_fields; ++i) {
+                        event_sum += std::stod(second_row_vals[csv_offset + i]);
+                    }
+                }
+                csv_offset += n_csv_fields;
+                                            
+                double normalized = event_sum * (sleep_sec / elapsed_runtime);
+                
+                for (const auto& selected : counter_selection_.extra_counters) {
+                    if (ev.find(selected) != std::string::npos) {
+                        extra_perf_values_[selected] += normalized;
+                        if(verbose4) {
+                            std::cout << std::fixed << std::setprecision(6) 
+                                        << "[EXTRA LIKWID] Parsed extra: " << selected 
+                                        << " -> event_sum=" << event_sum 
+                                        << " normalized=" << normalized 
+                                        << " (elapsed=" << elapsed_runtime << "s)" << std::endl;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return true;
 }
 
 bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long& last_cas_rd, long long& last_cas_wr, double& last_elapsed, int pause, int ratio, bool fast_resume, std::function<void()> on_sample) {
+    const bool verbose4 = config_.verbosity >= 4;
+    
     std::string likwidCmd = find_likwid_binary();
     if (likwidCmd.empty()) return false;
 
@@ -375,6 +761,8 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
 
     std::string intervalStr = std::to_string(static_cast<int>(sampling_interval_ms_)) + "ms";
     std::string cmd = "\"" + likwidCmd + "\" -f -c 0 -O -g " + eventString + " -t " + intervalStr + " sleep 3600 2>&1";
+    
+    if (verbose4) std::cout << "[LIKWID] Likwid command: " << cmd << std::endl;
 
     int relaunch_attempts = 0;
     auto relaunch_current_traffic_gen = [&]() -> bool {
@@ -441,6 +829,7 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
     
     std::vector<int> rdIndices;
     std::vector<int> wrIndices;
+    std::map<std::string, std::vector<int>> unusedExtraIndices;
     bool headerParsed = false;
 
     auto loop_start = std::chrono::steady_clock::now();
@@ -514,7 +903,7 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
         if (line.empty()) continue;
 
         if (line.find("# GID|") != std::string::npos) {
-            parse_likwid_header(line, type, rdIndices, wrIndices);
+            parse_likwid_header(line, type, rdIndices, wrIndices, unusedExtraIndices);
             headerParsed = true;
             continue;
         }
@@ -663,6 +1052,14 @@ bool LikwidBandwidthMeasurer::monitor_command(const std::string& command,
         return false;
     }
 
+    auto resolvedExtras = resolve_extra_counters(likwidCmd, eventString);
+    for (const auto& resolved : resolvedExtras) {
+        for (const auto& evStr : resolved.resolvedStrings) {
+            if (!eventString.empty()) eventString += ",";
+            eventString += evStr;
+        }
+    }
+
     int interval_ms = summary_mode ? 1000 : static_cast<int>(sampling_interval_ms_);
     std::string intervalStr = std::to_string(interval_ms) + "ms";
 
@@ -676,6 +1073,7 @@ bool LikwidBandwidthMeasurer::monitor_command(const std::string& command,
     
     std::vector<int> rdIndices;
     std::vector<int> wrIndices;
+    std::map<std::string, std::vector<int>> extraIndices;
     bool headerParsed = false;
     
     double current_timestamp = 0.0;
@@ -684,14 +1082,16 @@ bool LikwidBandwidthMeasurer::monitor_command(const std::string& command,
     long long total_wr = 0;
     double max_timestamp = 0.0;
 
+    std::map<std::string, long long> current_extra;
+    std::map<std::string, long long> total_extra;
+
     ensure_scaling_factor_cached();
 
     auto process_sample = [&](double timestamp, long long rd, long long wr) {
         double duration_s = interval_ms / 1000.0;
         double bw = calculate_bandwidth_gbps(rd, wr, duration_s, type, cached_cache_line_size_, cached_scaling_factor_);
-        static const MonitorSampleExtras kEmptyExtras;
         if (callback) {
-            callback(timestamp, bw, rd, wr, kEmptyExtras);
+            callback(timestamp, bw, rd, wr, current_extra);
         }
     };
 
@@ -702,7 +1102,7 @@ bool LikwidBandwidthMeasurer::monitor_command(const std::string& command,
         if (line.empty()) continue;
 
         if (line.find("# GID|") != std::string::npos) {
-            parse_likwid_header(line, type, rdIndices, wrIndices);
+            parse_likwid_header(line, type, rdIndices, wrIndices, extraIndices);
             headerParsed = true;
             continue;
         }
@@ -723,6 +1123,19 @@ bool LikwidBandwidthMeasurer::monitor_command(const std::string& command,
             }
             for (int idx : wrIndices) {
                 if (idx < static_cast<int>(values.size())) sample_wr += std::stod(values[idx]);
+            }
+
+            for (auto& kv : current_extra) { kv.second = 0; }
+            for (const auto& [key, indices] : extraIndices) {
+                for (int idx : indices) {
+                    if (idx < static_cast<int>(values.size())) {
+                        current_extra[key] += static_cast<long long>(std::stod(values[idx]));
+                    }
+                }
+            }
+
+            for (const auto& kv : current_extra) {
+                total_extra[kv.first] += kv.second;
             }
             
             sample_count++;
@@ -747,10 +1160,13 @@ bool LikwidBandwidthMeasurer::monitor_command(const std::string& command,
         double duration = (max_timestamp > 0) ? max_timestamp : elapsed_seconds;
         
         double bw = calculate_bandwidth_gbps(total_rd, total_wr, duration, type, cached_cache_line_size_, cached_scaling_factor_);
-        static const MonitorSampleExtras kEmptyExtras;
         if (callback) {
-            callback(duration, bw, total_rd, total_wr, kEmptyExtras);
+            callback(duration, bw, total_rd, total_wr, total_extra);
         }
+    }
+
+    for (const auto& kv : total_extra) {
+        extra_perf_values_[kv.first] = kv.second;
     }
 
     return true;

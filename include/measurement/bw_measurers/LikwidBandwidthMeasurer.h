@@ -63,16 +63,29 @@ private:
         std::string readCounter;
         std::string writeCounter;
     };
+
+    struct ResolvedExtraEvent {
+        std::string eventName;
+        std::string boxType;
+        std::vector<std::string> resolvedStrings;
+    };
     
     std::vector<MemoryChannel> parse_memory_counters(const std::string& output, const std::string& memType) const;
     std::vector<UpiChannel> parse_upi_counters(const std::string& output) const;
+    std::vector<ResolvedExtraEvent> resolve_extra_counters(
+        const std::string& likwidCmd,
+        const std::string& bwEventString) const;
     
     void parse_likwid_header(const std::string& line, CounterType type,
-                              std::vector<int>& rdIndices, std::vector<int>& wrIndices) const;
+                              std::vector<int>& rdIndices, std::vector<int>& wrIndices,
+                              std::map<std::string, std::vector<int>>& extraIndices) const;
     std::pair<std::string, CounterType> determine_memory_type() const;
 
     mutable std::string cached_likwid_binary_;
     mutable std::map<CounterType, std::string> event_string_cache_;
+    mutable std::vector<ResolvedExtraEvent> cached_resolved_extras_;
+    mutable std::string cached_bw_event_string_;
+    mutable bool extras_resolved_ = false;
 };
 
 #endif

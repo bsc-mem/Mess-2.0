@@ -449,7 +449,7 @@ bool BenchmarkExecutor::run() {
                         }
                         
                         if (check_and_rerun_outliers(ratio_pct, pause, mode)) {
-                             if (config_.verbosity >= 1) {
+                             if (config_.verbosity >= 2) {
                                 std::cout << "\n    ⚠ Failed to resolve outliers after retries. Restarting point...\n";
                             }
                             needs_restart = true;
