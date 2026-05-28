@@ -50,18 +50,20 @@
 #include <future>
 #include <sstream>
 
-#include "system_detection.h"
+#include "SystemDetection.h"
 #include "architecture/ArchitectureRegistry.h"
 #include "architecture/BandwidthCounterStrategy.h"
-#include "benchmark_config.h"
-#include "codegen.h"
-#include "measurement.h"
-#include "benchmark_executor.h"
-#include "results_processor.h"
-#include "cli_parser.h"
+#include "BenchmarkConfig.h"
+#include "Codegen.h"
+#include "Measurement.h"
+#include "BenchmarkExecutor.h"
+#include "ResultsProcessor.h"
+#include "CliParser.h"
 
-#include "utils.h"
-#include "ptrchase_perf_helper.h"
+#include "Utils.h"
+#include "PtrchasePerfHelper.h"
+#include "measurement/InstructionSamplerFactory.h"
+#include "utils/TerminalCursor.h"
 
 #define MESS_VERSION "2.0.0"
 
@@ -167,10 +169,15 @@ volatile sig_atomic_t g_signal_notified = 0;
 
 void signal_handler(int signal) {
     if (signal == SIGINT || signal == SIGTERM) {
+        terminal::show_cursor_signal_safe();
         if (!g_signal_notified) {
             const char msg[] = "\n\nEnding execution please wait...\n";
             write(STDERR_FILENO, msg, sizeof(msg) - 1);
             g_signal_notified = 1;
+        } else {
+            const char msg[] = "\nCTRL+C is already being handled, please wait...\n";
+            write(STDERR_FILENO, msg, sizeof(msg) - 1);
+            return;
         }
         
         if (g_executor) {
@@ -178,12 +185,12 @@ void signal_handler(int signal) {
         }
 
         system("pkill -u $(id -u) -TERM -x traffic_gen_multiseq.x 2>/dev/null || true");
-        system("pkill -u $(id -u) -TERM -x traffic_gen_rand.x 2>/dev/null || true");
         system("pkill -u $(id -u) -TERM -x ptr_chase 2>/dev/null || true");
         system("pkill -u $(id -u) -KILL -x traffic_gen_multiseq.x 2>/dev/null || true");
-        system("pkill -u $(id -u) -KILL -x traffic_gen_rand.x 2>/dev/null || true");
         system("pkill -u $(id -u) -KILL -x ptr_chase 2>/dev/null || true");
+        system("pkill -u $(id -u) -TERM perf 2>/dev/null || true");
         system("rm -f /tmp/traffic_gen_pid_* /tmp/ptr_chase_perf_* /tmp/ptr_chase_ready_*.flag /tmp/ptr_chase_start_*.flag /tmp/mess_ptrchase_pipe_* /tmp/mess_tgen_ready_* /tmp/ptr_chase_*.log 2>/dev/null");
+        system("rm -f /dev/shm/mem_sampler_perf_*.data /dev/shm/mem_sampler_perf_*.log 2>/dev/null");
         
         std::signal(signal, SIG_DFL);
         raise(signal);
@@ -300,11 +307,12 @@ int main(int argc, char **argv) {
         const auto perf_probe = perf_probe_future.get();
         const int paranoid_level = perf_probe.paranoid_level;
         const bool perf_accessible = perf_probe.perf_accessible;
+        const auto& caps = detector.get_capabilities();
 
         std::future<TLBMeasurement> tlb_future;
         const std::string status_prefix = "Initial status: ";
         std::cout << status_prefix << "\033[33mChecking...\033[0m" << std::string(10, ' ') << "\r" << std::flush;
-        if (perf_accessible) {
+        if (perf_accessible && caps.arch != CPUArchitecture::RISCV64) {
             std::cout << status_prefix << "\033[33mMeasuring TLB...\033[0m" << std::string(5, ' ') << "\r" << std::flush;
             tlb_future = std::async(std::launch::async, []() {
                 return measure_and_set_tlb_latency();
@@ -315,8 +323,6 @@ int main(int argc, char **argv) {
             tlb_measurement.latency_ns = 0.0;
         }
 
-        const auto& caps = detector.get_capabilities();
-
         int src_cpu = 0;
         if (!config->traffic_gen_explicit_cores.empty()) {
             try {
@@ -326,26 +332,56 @@ int main(int argc, char **argv) {
 
         std::vector<int> target_nodes = config->memory_bind_nodes;
         if (target_nodes.empty()) {
-            target_nodes.push_back(0);
+            target_nodes.push_back(get_numa_node_of_cpu(src_cpu));
         }
 
         auto& bw_strategy = BandwidthCounterStrategy::instance();
         bw_strategy.set_measurer_type(string_to_measurer_type(config->measurer));
         bw_strategy.set_extra_counters(config->add_counters);
         bw_strategy.set_memory_type(caps.memory_type);
+        std::cout << status_prefix << "\033[33mDiscovering counters...\033[0m" << std::string(5, ' ') << "\r" << std::flush;
         auto counter_discovery_future = std::async(std::launch::async, [&bw_strategy, src_cpu, &target_nodes, &caps]() {
             bw_strategy.initialize(src_cpu, target_nodes, caps);
         });
+
 
         if (perf_accessible && tlb_future.valid()) {
             tlb_measurement = tlb_future.get();
             tlb_ok = (tlb_measurement.latency_ns > 0);
         }
 
+        std::cout << status_prefix << "\033[33mWaiting for counter discovery...\033[0m" << std::string(5, ' ') << "\r" << std::flush;
         counter_discovery_future.get();
         cache_future.get();
 
-        bool overall_ok = perf_accessible && tlb_ok;
+        if (!config->traffic_gen_explicit_cores.empty()) {
+            try {
+                int first_cpu = std::stoi(config->traffic_gen_explicit_cores[0]);
+                auto& cache = SystemToolsCache::instance();
+                cache.ptr_chase_cpu = first_cpu;
+                auto it = cache.cpu_topology.find(first_cpu);
+                if (it != cache.cpu_topology.end()) {
+                    cache.ptr_chase_node = it->second.node;
+                } else {
+                    cache.ptr_chase_node = get_numa_node_of_cpu(first_cpu);
+                }
+            } catch (...) {}
+        }
+
+        const std::string sampler_diagnostic = config->instruction_sampling
+            ? InstructionSamplerFactory::availability_diagnostic(caps.arch)
+            : std::string();
+        const bool sampler_ok = sampler_diagnostic.empty();
+
+        bool overall_ok = perf_accessible && tlb_ok && sampler_ok;
+
+        // Initialize default ratios if none specified
+        if (config->ratios_pct.empty()) {
+            config->ratios_pct.clear();
+            for (int ratio = 100; ratio >= 0; ratio -= 2) {
+                config->ratios_pct.push_back(static_cast<double>(ratio));
+            }
+        }
 
         std::cout << "\r" << std::string(80, ' ') << "\r";
         std::cout << status_prefix;
@@ -362,6 +398,9 @@ int main(int argc, char **argv) {
             }
             if (perf_accessible && !tlb_ok) {
                 std::cout << "  → TLB measurement not available (using default values)" << std::endl;
+            }
+            if (!sampler_ok) {
+                std::cout << "  → " << sampler_diagnostic << std::endl;
             }
 
             if (!config->dry_run) {
@@ -390,11 +429,29 @@ int main(int argc, char **argv) {
             }
             std::cout << "\n";
             std::cout << "  Channels: " << caps.memory_channels << "\n";
-            std::cout << "  Total Size: " << (caps.total_memory / (1000*1000*1000)) << " GB\n\n";
+            std::cout << "  Total Size: " << (caps.total_memory / (1000*1000*1000)) << " GB\n";
+            std::cout << "  HBM detected: " << (bw_strategy.is_hbm() ? "yes" : "no") << "\n\n";
+
+            {
+                const auto numa_memory = detect_numa_memory_info(caps.model_name, caps.hasOnPackageHBM());
+                std::cout << "NUMA Memory Topology (per-node classification):\n";
+                std::cout << "  node  cpus  dax   size(GB)  HMAT_bw(MB/s)  HMAT_lat(ns)  type\n";
+                for (const auto& kv : numa_memory) {
+                    const auto& n = kv.second;
+                    std::cout << "  " << std::left << std::setw(6) << n.id
+                              << std::setw(6) << (n.has_cpus ? "yes" : "no")
+                              << std::setw(6) << (n.is_dax_backed ? "yes" : "no")
+                              << std::setw(10) << (n.mem_total_bytes / (1000LL*1000*1000))
+                              << std::setw(15) << n.read_bandwidth_mb_s
+                              << std::setw(14) << n.read_latency_ns
+                              << n.memory_type << "\n";
+                }
+                std::cout << "\n";
+            }
 
             int num_cores = config->traffic_gen_cores;
             if (num_cores <= 0) {
-                num_cores = detector.get_system_info().sockets[0].core_count - 1;
+                num_cores = get_default_traffic_gen_cores(detector.get_system_info());
             }
             if (num_cores < 1) num_cores = 1;
 
@@ -412,12 +469,13 @@ int main(int argc, char **argv) {
                 std::cout << "Cache Line Size: " << tlb_measurement.cache_line_size << " bytes" << std::endl;
             }
 
+
             std::cout << "TLB Page Walk Counters:" << std::endl;
             if (use_tlb1) {
-                std::cout << "  L1 TLB Miss / L2 Hit: 0x" << std::hex << tlb1_raw << std::dec << std::endl;
+                std::cout << "  Page Walk: 0x" << std::hex << tlb1_raw << std::dec << std::endl;
             }
             if (use_tlb2) {
-                std::cout << "  Page Walk: 0x" << std::hex << tlb2_raw << std::dec << std::endl;
+                std::cout << "  STLB Hit / L1D Refill: 0x" << std::hex << tlb2_raw << std::dec << std::endl;
             }
             if (!use_tlb1 && !use_tlb2) {
                 std::cout << "  None defined for this architecture" << std::endl;
@@ -425,16 +483,6 @@ int main(int argc, char **argv) {
 
             std::cout << "\nDry run complete - the benchmark was not executed." << std::endl;
             return EXIT_SUCCESS;
-        }
-
-        if (config->ratios_pct.empty()) {
-            config->ratios_pct.clear();
-            for (int ratio = 0; ratio <= 100; ratio += 2) {
-                config->ratios_pct.push_back(static_cast<double>(ratio));
-            }
-            if (config->verbosity >= 2) {
-                std::cout << "System benchmark enabled: running all ratios (0-100%)" << std::endl;
-            }
         }
 
         if (config->verbosity >= 3) {
@@ -448,7 +496,7 @@ int main(int argc, char **argv) {
             
             int traffic_cores = config->traffic_gen_cores;
             if (traffic_cores <= 0) {
-                traffic_cores = detector.get_system_info().sockets[0].core_count - 1;
+                traffic_cores = get_default_traffic_gen_cores(detector.get_system_info());
             }
             if (traffic_cores < 1) traffic_cores = 1;
 
@@ -460,6 +508,7 @@ int main(int argc, char **argv) {
             std::cout << "Detected Architecture: " << ArchitectureRegistry::instance().getArchitecture(detector.get_capabilities())->getName() << std::endl;
             std::cout << "  Memory Binding: " << config->get_bind_name() << std::endl;
             std::cout << std::endl;
+
         }
 
         KernelGenerator kernel_gen(config->kernel, detector.get_capabilities());
@@ -491,10 +540,13 @@ int main(int argc, char **argv) {
         if (num_cores < 1) num_cores = 1;
 
         kernel_gen.generate_kernel(output_dir);
+
         BenchmarkExecutor executor(*config, detector.get_system_info(), capabilities,
                                  tlb_measurement.latency_ns, tlb_measurement.cache_line_size);
         g_executor = &executor;
-        
+
+        terminal::CursorGuard cursor_guard;
+
         if (!executor.run()) {
             g_executor = nullptr;
             std::cerr << "\n\nBenchmark execution failed" << std::endl;

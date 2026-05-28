@@ -30,9 +30,23 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 CC = gcc
 MPICC = mpicc
-CFLAGS = -march=native -Wall -fopenmp
-MPICC_FLAGS = -diag-disable=10441
-LDFLAGS = -pthread -lrt -fopenmp
+
+
+
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    OMP_FLAG = 
+    OMP_LIB = 
+else
+    OMP_FLAG = -fopenmp
+    OMP_LIB = -lrt -fopenmp
+endif
+
+CFLAGS = -march=native -Wall $(OMP_FLAG)
+LDFLAGS = -pthread $(OMP_LIB)
+
+
+
 
 SRCDIR=src
 BUILDDIR=build

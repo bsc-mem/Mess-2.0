@@ -38,6 +38,12 @@
 #include "architecture/ISA.h"
 #include <sstream>
 
+/**
+ * @file RiscvAssembler.h
+ * @brief RISC-V assembly emitter for generated traffic kernels.
+ */
+
+/** @brief Emits RISC-V-specific assembly fragments for generated kernels. */
 class RiscvAssembler : public KernelAssembler {
     KernelConfig config_;
 public:

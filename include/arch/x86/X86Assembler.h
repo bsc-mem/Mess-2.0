@@ -38,6 +38,12 @@
 #include "architecture/ISA.h"
 #include <sstream>
 
+/**
+ * @file X86Assembler.h
+ * @brief x86 assembly emitter for generated traffic kernels.
+ */
+
+/** @brief Emits x86-specific assembly fragments for generated kernels. */
 class X86Assembler : public KernelAssembler {
     KernelConfig config_;
 public:

@@ -43,18 +43,19 @@ burst_iterations = {{BURST_ITERS_VALUE}}
 
 # Compute derived parameters
 array_elems:=$(shell echo $$(( $(array_size) / $(cache_line_size) )))
+active_array_elems:={{ACTIVE_ARRAY_ELEMS_VALUE}}
 loop_instr:=$(shell echo $$(( $(instructions) / $(iterations) )))
 
 all: $(TARGET) array
 
 $(TARGET): ptr_chase.c loop.h
-	$(CC) -O0 -pthread -DARRAY_ELEMS=$(array_elems) -DITERS=$(iterations) -DBURST_ITERS=$(burst_iterations) -DLOOP_FOREVER=1 -o $(TARGET) ptr_chase.c
+	$(CC) -O0 -pthread -DARRAY_ELEMS=$(array_elems) -DACTIVE_ARRAY_ELEMS=$(active_array_elems) -DITERS=$(iterations) -DBURST_ITERS=$(burst_iterations) -DCACHE_LINE=$(cache_line_size) -DLOOP_FOREVER=1 -o $(TARGET) ptr_chase.c
 
 loop.h: loop_template.h
 	awk '{for(i=0; i<${loop_instr}; i++)print}' loop_template.h > loop.h
 
 $(TARGET_ARRAYGEN): arraygen.c
-	$(CC) -O3 -DARRAY_ELEMS=$(array_elems) -o $(TARGET_ARRAYGEN) arraygen.c
+	$(CC) -O3 -DARRAY_ELEMS=$(array_elems) -DACTIVE_ARRAY_ELEMS=$(active_array_elems) -DCACHE_LINE=$(cache_line_size) -o $(TARGET_ARRAYGEN) arraygen.c
 
 array: $(TARGET_ARRAYGEN)
 	./$(TARGET_ARRAYGEN)

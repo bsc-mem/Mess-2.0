@@ -127,6 +127,7 @@ std::vector<std::shared_ptr<ISA>> X86Architecture::getSupportedISAs() const {
         std::make_shared<X86ISA>(ISAMode::AVX512, "AVX-512", 512, 32),
         std::make_shared<X86ISA>(ISAMode::AVX2,   "AVX2",    256, 16),
         std::make_shared<X86ISA>(ISAMode::AVX,    "AVX",     256, 16),
+        std::make_shared<X86ISA>(ISAMode::SSE2,   "SSE2",    128, 16),
         std::make_shared<X86ISA>(ISAMode::SCALAR, "SCALAR",  64,  14)
     };
 }
@@ -139,6 +140,7 @@ std::shared_ptr<ISA> X86Architecture::selectBestISA(const CPUCapabilities& caps)
     if (has(ISAExtension::AVX2))   return std::make_shared<X86ISA>(ISAMode::AVX2,   "AVX2",    256, 16);
     if (has(ISAExtension::AVX512)) return std::make_shared<X86ISA>(ISAMode::AVX512, "AVX-512", 512, 32);
     if (has(ISAExtension::AVX))    return std::make_shared<X86ISA>(ISAMode::AVX,    "AVX",     256, 16);
+    if (has(ISAExtension::SSE2))   return std::make_shared<X86ISA>(ISAMode::SSE2,   "SSE2",    128, 16);
     
     return std::make_shared<X86ISA>(ISAMode::SCALAR, "SCALAR", 64, 14);
 }

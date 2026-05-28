@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
+import math
 import os
 import sys
 import argparse
 import pandas as pd
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.cm import ScalarMappable
 from scipy.interpolate import interp1d
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -94,33 +98,6 @@ def calculate_read_ratio(read_bytes, write_bytes):
         return 50.0
     return (read_bytes / total) * 100.0
 
-def find_latency_for_point(bw, read_ratio, curves_df, ratio_col, bw_col, lat_col):
-    available_ratios = sorted(curves_df[ratio_col].unique())
-    
-    if not available_ratios:
-        return np.nan
-    
-    closest_ratio = min(available_ratios, key=lambda x: abs(x - read_ratio))
-    
-    curve_data = curves_df[curves_df[ratio_col] == closest_ratio].sort_values(bw_col)
-    
-    if len(curve_data) < 2:
-        return np.nan
-    
-    bw_values = curve_data[bw_col].values
-    lat_values = curve_data[lat_col].values
-    
-    if bw < bw_values.min():
-        return lat_values[0]
-    if bw > bw_values.max():
-        return lat_values[-1]
-    
-    try:
-        interp_func = interp1d(bw_values, lat_values, kind='linear', fill_value='extrapolate')
-        return float(interp_func(bw))
-    except:
-        return np.nan
-
 def find_latency_for_point_dfs(bw, read_ratio, dfs_rw):
     available_ratios = sorted(dfs_rw.keys())
     
@@ -148,8 +125,72 @@ def find_latency_for_point_dfs(bw, read_ratio, dfs_rw):
     except:
         return np.nan
 
+def compute_stress_score(bw, latency, read_ratio, dfs_rw):
+    """Compute stress score for an app point on the curves.
+    
+    Score = 0.8 * score_latency + 0.2 * score_angle
+    - score_latency: normalized position between lead-off and max latency
+    - score_angle: slope angle of the curve at the point, normalized to 90 degrees
+    Range: 0 (best) to 1 (worst/most stressed)
+    """
+    available_ratios = sorted(dfs_rw.keys())
+    if not available_ratios:
+        return None
+    
+    closest_ratio = min(available_ratios, key=lambda x: abs(x - read_ratio))
+    curve_data = dfs_rw[closest_ratio].sort_values('bandwidth_smooth')
+    
+    if len(curve_data) < 2:
+        return None
+    
+    bw_values = curve_data['bandwidth_smooth'].values
+    lat_values = curve_data['latency_smooth'].values
+    
+    lead_off_lat = lat_values[0]
+    max_lat = lat_values[-1]
+    
+    if max_lat <= lead_off_lat:
+        return 0.0
+    
+    # score_latency: normalized latency position
+    score_latency = (latency - lead_off_lat) / (max_lat - lead_off_lat)
+    score_latency = max(0.0, min(1.0, score_latency))
+    
+    # score_angle: slope of the curve at the closest point
+    idx = np.searchsorted(bw_values, bw, side='right')
+    idx = max(1, min(idx, len(bw_values) - 1))
+    
+    bw_prev = bw_values[idx - 1]
+    bw_post = bw_values[idx]
+    lat_prev = lat_values[idx - 1]
+    lat_post = lat_values[idx]
+    
+    angle = math.degrees(math.atan2(lat_post - lat_prev, bw_post - bw_prev))
+    score_angle = max(0.0, min(1.0, angle / 90.0))
+    
+    score = 0.8 * score_latency + 0.2 * score_angle
+    return max(0.0, min(1.0, score))
+
+
+def get_stress_score_colors(cmap, dfs_rw, bws, latencies, read_ratios):
+    """Get color and score for each app point based on its stress score."""
+    colors = []
+    scores = []
+    for bw, lat, rr in zip(bws, latencies, read_ratios):
+        score = compute_stress_score(bw, lat, rr, dfs_rw)
+        if score is not None:
+            color = cmap(score) if score < 1.0 else (1.0, 0.0, 0.0, 1.0)
+        else:
+            color = (0.0, 0.0, 0.0, 1.0)
+            score = 0.0
+        colors.append(matplotlib.colors.rgb2hex(color))
+        scores.append(score)
+    return colors, scores
+
+
 def plot_app_on_curves(dfs_rw, profiler_df, output_path, config=None, 
-                       app_name='Application', cmap_name='Blues'):
+                       app_name='Application', cmap_name='Blues',
+                       stress_score=False):
     
     profiler_df = profiler_df.copy()
     profiler_df['read_ratio'] = profiler_df.apply(
@@ -235,9 +276,7 @@ def plot_app_on_curves(dfs_rw, profiler_df, output_path, config=None,
             sorting_list.append((rw, sort_value))
 
     if max_bw > 0:
-        limit_bw = max_bw
-        if global_max_bw > limit_bw:
-             limit_bw = global_max_bw * 1.1
+        limit_bw = max_bw * 1.1
     else:
         limit_bw = global_max_bw * 1.1 if global_max_bw > 0 else 321
 
@@ -257,7 +296,7 @@ def plot_app_on_curves(dfs_rw, profiler_df, output_path, config=None,
                 gap_fraction=0.5)
             if is_valid: 
                 ax.plot(df['bandwidth_smooth'], df['latency_smooth'], 
-                    color=calculate_color(rw, cmap_name), linewidth=2, 
+                    color=calculate_color(rw, cmap_name), linewidth=1,
                     label=f'Rd:Wr {rw}:0')
             else: 
                 if reason not in skipped_ratios:
@@ -267,15 +306,38 @@ def plot_app_on_curves(dfs_rw, profiler_df, output_path, config=None,
     for reason, ratios in skipped_ratios.items():
         print(f"Warning: Ratios {ratios} not plotted: {reason}")
 
-    ax.scatter(
-        profiler_df['Bandwidth(GB/s)'],
-        profiler_df['latency'],
-        c='black',
-        s=50,
-        alpha=0.5,
-        zorder=10,
-        label=app_name
-    )
+    if stress_score:
+        stress_cmap = LinearSegmentedColormap.from_list('stressScore', ['green', 'yellow', 'red'])
+        dot_colors, stress_scores = get_stress_score_colors(
+            stress_cmap, dfs_rw,
+            profiler_df['Bandwidth(GB/s)'].values,
+            profiler_df['latency'].values,
+            profiler_df['read_ratio'].values,
+        )
+        profiler_df['stress_score'] = stress_scores
+        ax.scatter(
+            profiler_df['Bandwidth(GB/s)'],
+            profiler_df['latency'],
+            c=dot_colors,
+            s=50,
+            alpha=0.6,
+            zorder=10,
+            linewidths=0,
+        )
+        fig.colorbar(
+            ScalarMappable(cmap=stress_cmap),
+            ax=ax, orientation='vertical', label='Stress score',
+        )
+    else:
+        ax.scatter(
+            profiler_df['Bandwidth(GB/s)'],
+            profiler_df['latency'],
+            c='black',
+            s=50,
+            alpha=0.5,
+            zorder=10,
+            label=app_name
+        )
 
     if config:
         is_nvidia_pmu = config.get("USE_NVIDIA_PMU", "False").lower() in ('true', '1', 't')
@@ -283,7 +345,7 @@ def plot_app_on_curves(dfs_rw, profiler_df, output_path, config=None,
         should_draw_max_bw_line = not (is_nvidia_pmu and nvlink_bw == 0)
 
         if max_bw > 0 and should_draw_max_bw_line:
-            ax.axvline(x=max_bw, color='red', linewidth=2, linestyle=':')
+            ax.axvline(x=max_bw, color=calculate_color(75, cmap_name), linewidth=2, linestyle=':')
             ax.text(x=max_bw, y=ax.get_ylim()[1] * 0.95, 
                    s=f'Max. theoretical BW = {max_bw:.0f} GB/s', 
                    horizontalalignment='right', fontsize=fontSizeMess - 4)
@@ -317,6 +379,11 @@ def print_summary(profiler_df, app_name):
     if 'latency' in profiler_df.columns:
         print(f"  Estimated Latency: {profiler_df['latency'].min():.1f} - {profiler_df['latency'].max():.1f} ns")
         print(f"  Avg Estimated Latency: {profiler_df['latency'].mean():.1f} ns")
+    if 'stress_score' in profiler_df.columns:
+        print(f"  Stress Score: {profiler_df['stress_score'].min():.3f} - {profiler_df['stress_score'].max():.3f}")
+        print(f"  Avg Stress Score: {profiler_df['stress_score'].mean():.3f}")
+        high_pct = (profiler_df['stress_score'] >= 0.7).sum() / len(profiler_df) * 100
+        print(f"  Points with score >= 0.7: {high_pct:.1f}%")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -333,6 +400,8 @@ def main():
                         help='Application name for the plot title')
     parser.add_argument('--cmap', default='Blues',
                         help='Colormap for the background curves')
+    parser.add_argument('--stress-score', '-s', action='store_true',
+                        help='Color application dots by stress score (green=low, red=high)')
     
     args = parser.parse_args()
     
@@ -373,7 +442,8 @@ def main():
     print(f"\nGenerating plot...")
     result_df = plot_app_on_curves(
         dfs_rw, profiler_df, output_path, 
-        config=config, app_name=args.name, cmap_name=args.cmap
+        config=config, app_name=args.name, cmap_name=args.cmap,
+        stress_score=args.stress_score
     )
     
     if result_df is not None:

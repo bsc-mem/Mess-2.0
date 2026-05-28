@@ -34,7 +34,7 @@
 #include "arch/x86/counters/AmdZenCounters.h"
 
 CasCounterSelection AmdZenCounters::detectCasCounters() {
-    auto result = discoverFromPerf();
+    auto result = discoverCasCountersForRequestedMeasurer();
     
     if (!result.has_read_write && !result.has_combined_counter) {
         result.failure_reason = "AMD Zen dram_channel_data_controller counters not found";
@@ -44,8 +44,10 @@ CasCounterSelection AmdZenCounters::detectCasCounters() {
 }
 
 void AmdZenCounters::getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) {
-    tlb1_raw = 0x0F45;
-    tlb2_raw = 0xF045;
+    // AMD Zen memory PMU events (kernel JSON, same encoding for Zen3/Zen4):
+    //   https://github.com/torvalds/linux/blob/master/tools/perf/pmu-events/arch/x86/amdzen4/memory.json
+    tlb1_raw = 0xF045;  // ls_l1_d_tlb_miss.all_l2_miss: "L1 DTLB misses that miss the L2 DTLB (page walks)"
+    tlb2_raw = 0x0F45;  // ls_l1_d_tlb_miss.*_l2_h:     "L1 DTLB misses that hit the L2 DTLB (STLB hits)"
     use_tlb1 = true;
     use_tlb2 = true;
 }

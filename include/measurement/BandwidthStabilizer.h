@@ -35,6 +35,7 @@
 
 #include <deque>
 #include <vector>
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <iomanip>
@@ -46,12 +47,21 @@
 
 #include "measurement/TheoreticalPeakCalculator.h"
 
+/**
+ * @file BandwidthStabilizer.h
+ * @brief Sliding-window bandwidth stabilization logic used during sampling.
+ */
+
+/**
+ * @brief One raw sample used by the stabilization window.
+ */
 struct BWSample {
     long long cas_rd;
     long long cas_wr;
     double bw_gb_s = 0.0;
 };
 
+/** @brief Possible outcomes of one stabilization update. */
 enum class StabilizationResult {
     PENDING,
     STABLE,
@@ -60,6 +70,9 @@ enum class StabilizationResult {
     TIMEOUT
 };
 
+/**
+ * @brief Health checks used to detect crashed or stalled traffic generators.
+ */
 struct TrafficGenHealthChecker {
     std::function<bool(int)> is_pid_alive;
     std::function<int()> count_running_instances;
@@ -90,6 +103,9 @@ struct TrafficGenHealthChecker {
     }
 };
 
+/**
+ * @brief Applies warmup, stability, and trend gates to bandwidth samples.
+ */
 class BandwidthStabilizer {
 public:
     BandwidthStabilizer(
@@ -121,12 +137,23 @@ public:
         
         if (!gate2_warmup_check(bw_gb_s)) {
             warmup_samples_discarded_++;
-            if (verbosity_ >= 3) {
-                std::cout << "      [WARMUP] Discarding sample " << std::fixed << std::setprecision(2) 
-                          << bw_gb_s << " GB/s (< threshold " << warmup_threshold_gb_s_ << " GB/s)" << '\n';
+            if (warmup_samples_discarded_ >= max_warmup_rejections_) {
+                if (!warmup_bypassed_ && verbosity_ >= 1) {
+                    std::cout << "      [WARMUP BYPASS] " << warmup_samples_discarded_
+                              << " consecutive samples below threshold " << std::fixed
+                              << std::setprecision(2) << warmup_threshold_gb_s_
+                              << " GB/s; BW appears genuinely low, allowing samples into the window"
+                              << '\n';
+                }
+                warmup_bypassed_ = true;
+            } else {
+                if (verbosity_ >= 3) {
+                    std::cout << "      [WARMUP] Discarding sample " << std::fixed << std::setprecision(2)
+                              << bw_gb_s << " GB/s (< threshold " << warmup_threshold_gb_s_ << " GB/s)" << '\n';
+                }
+                last_result_ = StabilizationResult::WARMUP_REJECTED;
+                return last_result_;
             }
-            last_result_ = StabilizationResult::WARMUP_REJECTED;
-            return last_result_;
         }
         
         samples_.push_back({cas_rd, cas_wr, bw_gb_s});
@@ -138,7 +165,8 @@ public:
         
         if (gate3_stability_check() && gate4_trend_check()) {
             last_result_ = StabilizationResult::STABLE;
-        } else if (total_samples_seen_ >= max_samples_before_force_stable_) {
+        } else if (total_samples_seen_ >= max_samples_before_force_stable_
+                   && samples_.size() >= window_size_) {
             if (verbosity_ >= 2) {
                 std::cout << "      [FORCE STABLE] Max samples (" << max_samples_before_force_stable_ 
                           << ") reached, accepting current BW" << '\n';
@@ -153,26 +181,6 @@ public:
         return last_result_ == StabilizationResult::STABLE;
     }
 
-    StabilizationResult get_last_result() const { return last_result_; }
-
-    bool validate_post_measurement(double initial_bw_gb_s, double final_bw_gb_s) const {
-        bool initial_active = initial_bw_gb_s > noise_floor_gb_s_;
-        bool final_active = final_bw_gb_s > noise_floor_gb_s_;
-        
-        if (initial_active && !final_active) {
-            return false;
-        }
-        
-        if (initial_active && final_active) {
-            double drift = std::abs(final_bw_gb_s - initial_bw_gb_s) / initial_bw_gb_s;
-            if (drift > 0.10) {
-                return false;
-            }
-        }
-        
-        return true;
-    }
-
     void reset() {
         samples_.clear();
         mean_bw_gb_s_ = 0.0;
@@ -183,15 +191,11 @@ public:
         last_result_ = StabilizationResult::PENDING;
         mean_history_.clear();
         has_active_trend_ = false;
+        warmup_bypassed_ = false;
     }
 
     double get_mean_bw() const { return mean_bw_gb_s_; }
-    double get_stddev_bw() const { return stddev_bw_gb_s_; }
-    double get_cv() const { return cv_; }
     double get_noise_floor() const { return noise_floor_gb_s_; }
-    double get_theoretical_peak() const { return theoretical_peak_gb_s_; }
-    size_t get_sample_count() const { return samples_.size(); }
-    int get_warmup_discarded() const { return warmup_samples_discarded_; }
     const std::deque<BWSample>& get_samples() const { return samples_; }
 
     void print_status(double read_ratio, double sample_bw_gb_s = -1.0, bool has_distinct_rw = true) const {
@@ -243,7 +247,9 @@ private:
     double cv_ = 0.0;
     int warmup_samples_discarded_ = 0;
     int total_samples_seen_ = 0;
+    bool warmup_bypassed_ = false;
     static constexpr int max_samples_before_force_stable_ = 50;
+    static constexpr int max_warmup_rejections_ = 50;
     StabilizationResult last_result_ = StabilizationResult::PENDING;
 
     std::deque<double> mean_history_;
@@ -269,10 +275,27 @@ private:
     }
 
     bool gate2_warmup_check(double bw_gb_s) {
+        if (warmup_bypassed_) return true;
         if (pause_value_ == 0 && bw_gb_s < warmup_threshold_gb_s_) {
             return false;
         }
         return true;
+    }
+
+    double compute_robust_stddev() const {
+        if (samples_.size() < 3) return stddev_bw_gb_s_;
+        std::vector<double> v;
+        v.reserve(samples_.size());
+        for (const auto& s : samples_) v.push_back(s.bw_gb_s);
+        auto max_it = std::max_element(v.begin(), v.end());
+        v.erase(max_it);
+
+        double sum = 0.0;
+        for (double x : v) sum += x;
+        double m = sum / v.size();
+        double sq = 0.0;
+        for (double x : v) sq += (x - m) * (x - m);
+        return std::sqrt(sq / v.size());
     }
 
     bool gate3_stability_check() const {
@@ -281,14 +304,19 @@ private:
         bool in_active_mode = mean_bw_gb_s_ > noise_floor_gb_s_;
         
         if (in_active_mode) {
+            double robust_stddev = compute_robust_stddev();
+
+            double abs_threshold = std::max(noise_floor_gb_s_, 0.1 * mean_bw_gb_s_);
+            if (robust_stddev < abs_threshold) return true;
+
             double low_bw_threshold = theoretical_peak_gb_s_ * 0.05;
-            
             if (mean_bw_gb_s_ < low_bw_threshold) {
                 double abs_stddev_threshold = 0.5;
-                return stddev_bw_gb_s_ < abs_stddev_threshold;
+                return robust_stddev < abs_stddev_threshold;
             }
-            
-            return cv_ < threshold_pct_;
+
+            double robust_cv = robust_stddev / mean_bw_gb_s_;
+            return robust_cv < threshold_pct_;
         } else {
             double strict_deviation = noise_floor_gb_s_ / 2.0;
             return stddev_bw_gb_s_ < strict_deviation;

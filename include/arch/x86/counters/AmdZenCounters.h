@@ -36,10 +36,32 @@
 
 #include "architecture/BandwidthCounterStrategy.h"
 
+/**
+ * @file AmdZenCounters.h
+ * @brief AMD Zen counter strategy.
+ */
+
+/** @brief Counter discovery strategy for AMD Zen systems. */
 class AmdZenCounters : public BandwidthCounterStrategy {
 public:
+    /**
+     * @brief Detects and returns the appropriate IMC counters for AMD Zen.
+     * @see X86Counters::detectCasCounters() for detailed explanation.
+     */
     CasCounterSelection detectCasCounters() override;
+
+    /**
+     * @brief Retrieves the raw event codes for TLB miss counters on AMD Zen.
+     * @see X86Counters::getTlbMissCounters() for detailed explanation.
+     */
     void getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) override;
+
+    // slot1 = page-walks, slot2 = STLB hits.
+    double computeTlbOverheadNs(double slot1, double slot2,
+                                double /*freq_ghz*/,
+                                double stlb_hit_latency_ns) const override {
+        return countBasedTlbOverheadNs(slot1, slot2, stlb_hit_latency_ns, getPageWalkLatencyNs());
+    }
 };
 
 #endif

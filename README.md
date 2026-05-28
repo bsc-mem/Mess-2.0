@@ -10,6 +10,7 @@
   <p>
     <a href="https://mess.bsc.es">Website</a> &nbsp;|&nbsp;
     <a href="https://github.com/bsc-mem/Mess-2.0">GitHub</a> &nbsp;|&nbsp;
+    <a href="https://github.com/bsc-mem/Mess-2.0/wiki">Wiki</a> &nbsp;|&nbsp;
     <a href="https://arxiv.org/pdf/2405.10170">Paper</a>
   </p>
   <p>
@@ -91,11 +92,11 @@ Support status follows the wiki ([Architecture-Support](https://github.com/bsc-m
 
 | Architecture | Status | SIMD | Notes |
 | --- | --- | --- | --- |
-| x86-64 CPUs | Supported | AVX2, AVX-512 | Intel and AMD processors |
-| ARM CPUs | Supported | NEON, SVE | Includes Neoverse, Graviton, Apple Silicon |
-| Power CPUs | Supported | VSX | Power8 and newer |
-| RISC-V CPUs | WIP | RVV 1.0 | Assembly + latency + counter detection available; bandwidth measurement pending |
-| GPUs | Pending | — | Under active development |
+| x86-64 CPUs | Supported | SCALAR, SSE2, AVX, AVX2, AVX-512 | Intel and AMD processors |
+| ARM CPUs | Supported | NEON, SVE | Includes Neoverse, Graviton, A64FX |
+| Power-PC CPUs | Supported | VSX, VMX | Power8 and newer |
+| RISC-V CPUs | WIP | RVV 1.0 | Under active development |
+| GPUs | WIP | — | Under active development |
 
 ---
 
@@ -179,6 +180,10 @@ export PATH=$PATH:$(pwd)/build/bin
 ./build/bin/mess
 
 ./build/bin/mess --profile
+
+./build/bin/mess --profile --tier=lite
+
+./build/bin/mess --profile --inst-lat
 ```
 
 Common options:
@@ -187,9 +192,13 @@ Common options:
 | --- | --- | --- |
 | `--ratio=N[,N...]` | Issued load ratio(s) in % | `--ratio=100,75,50` |
 | `--pause=N[,N...]` | Pause bubble values | `--pause=0,10,100,1000` |
+| `--tier=TIER` | Adaptive pause discovery preset (`lite/standard/detailed`) | `--tier=lite` |
+| `--point-count=N` | Custom adaptive point budget | `--point-count=75` |
 | `--profile` | Save measurement files | `--profile` |
 | `--verbose=N` | Verbosity level `0-4` | `--verbose=3` |
-| `--measurer=TYPE` | Counter backend (`auto/perf/likwid/pcm`) | `--measurer=perf` |
+| `--measurer=TYPE` | Counter backend (`auto/perf/likwid/vtune/pcm`) | `--measurer=perf` |
+| `--inst-lat` | Use hardware instruction sampling for latency (`PEBS/SPE`) | `--inst-lat` |
+| `--add-counters=LIST` | Measure extra counters alongside bandwidth | `--add-counters=cycles,instructions` |
 | `--bind=LIST` | NUMA memory-node binding | `--bind=0` |
 | `--cores=LIST` | Explicit traffic-generator cores | `--cores=0-15` |
 | `--total-cores=N` | Number of traffic-generator cores | `--total-cores=16` |
@@ -205,6 +214,28 @@ For the complete option set, use `./build/bin/mess --help` or see [Understanding
 ```bash
 ./build/bin/mess --profile --ratio=100 --pause=0 --verbose=3 --repetitions=1
 ./build/bin/mess --profile --ratio=0 --pause=0 --verbose=3 --repetitions=1
+```
+
+### Adaptive Curve Discovery
+
+```bash
+./build/bin/mess --profile --tier=standard
+./build/bin/mess --profile --point-count=75
+```
+
+### Instruction-Latency Sampling
+
+```bash
+./build/bin/mess --profile --inst-lat --tier=lite
+```
+
+### Backend Selection
+
+```bash
+./build/bin/mess --profile --measurer=likwid --bind=0
+./build/bin/mess --profile --measurer=pcm --bind=0
+./build/bin/mess --profile --measurer=vtune --tier=lite
+./build/bin/mess --profile --measurer=perf --add-counters=cycles,instructions
 ```
 
 ### NUMA Comparison
@@ -259,8 +290,10 @@ Plotter docs: [Plotter-Parser](https://github.com/bsc-mem/Mess-2.0/wiki/Plotter-
 
 ## Learning Resources
 
+- **Wiki**: [Mess 2.0 Wiki](https://github.com/bsc-mem/Mess-2.0/wiki)
 - **Tutorials and Slides**: [mess.bsc.es/tutorials](https://mess.bsc.es/tutorials)
 - **Detailed Methodology**: [memory.bsc.es/tools/mess-benchmark](https://memory.bsc.es/tools/mess-benchmark)
+- **Results Dataset**: [Mess Results (GitHub)](https://github.com/bsc-mem/Mess-Results) — bandwidth-latency curves for a variety of system architectures
 
 ---
 
@@ -282,14 +315,14 @@ Mess is developed by the **[Memory Systems Team](https://memory.bsc.es)** at the
 
 <table>
   <tr>
-    <td align="center" width="160" style="vertical-align: top;">
+    <td align="center" width="200" style="vertical-align: top;">
       <sub><b>Victor Xirau Guardans</b><br/>Main Mess 2.0 developer<br/><a href="mailto:victor.xirau@bsc.es">victor.xirau@bsc.es</a></sub>
     </td>
     <td align="center" width="160" style="vertical-align: top;">
       <sub><b>Mariana Carmin</b><br/>Mess 2.0 developer<br/><a href="mailto:mcarmin@bsc.es">mcarmin@bsc.es</a></sub>
     </td>
-    <td align="center" width="160" style="vertical-align: top;">
-      <sub><b>Pau Diaz</b><br/>Mess 2.0 developer<br/><a href="mailto:pau.diazcuesta@bsc.es">pau.diazcuesta@bsc.es</a></sub>
+     <td align="center" width="160" style="vertical-align: top;">
+      <sub><b>Pau Díaz</b><br/>Mess 2.0 developer<br/><a href="mailto:pau.diazcuesta@bsc.es">pau.diazcuesta@bsc.es</a></sub>
     </td>
     <td align="center" width="160" style="vertical-align: top;">
       <sub><b>Pouya Esmaili Dokht</b><br/>Mess Paper author<br/><a href="mailto:pouya.esmaili@bsc.es">pouya.esmaili@bsc.es</a></sub>
@@ -328,7 +361,8 @@ If you use Mess in research, please cite:
 1. **[Mess Benchmark](https://github.com/bsc-mem/Mess-benchmark)** — The original implementation of the Mess benchmark.
 2. **[Mess Simulator](https://github.com/bsc-mem/Mess-simulator)** — Analytical memory model using bandwidth-latency curves.
 3. **[Mess-Paraver](https://github.com/bsc-mem/Mess-Paraver)** — Integration with Paraver for visualization.
-4. **[Mess Paper](https://mess.bsc.es)** — Esmaili-Dokht, P., Sgherzi, F., Girelli, V. S., Boixaderas, I., Carmin, M., Monemi, A., Armejach, A., Mercadal, E., Llort, G., Radojković, P., Moreto, M., Giménez, J., Martorell, X., Ayguadé, E., Labarta, J., Confalonieri, E., Dubey, R., & Adlard, J. (2024). A mess of memory system benchmarking, simulation and application profiling. In _Proceedings of the 57th IEEE/ACM International Symposium on Microarchitecture_ (MICRO) (pp. 136-152). IEEE.
+4. **[Mess Results](https://github.com/bsc-mem/Mess-Results)** — Collection of bandwidth-latency curves for various system architectures; a dataset users can browse and compare.
+5. **[Mess Paper](https://mess.bsc.es)** — Esmaili-Dokht, P., Sgherzi, F., Girelli, V. S., Boixaderas, I., Carmin, M., Monemi, A., Armejach, A., Mercadal, E., Llort, G., Radojković, P., Moreto, M., Giménez, J., Martorell, X., Ayguadé, E., Labarta, J., Confalonieri, E., Dubey, R., & Adlard, J. (2024). A mess of memory system benchmarking, simulation and application profiling. In _Proceedings of the 57th IEEE/ACM International Symposium on Microarchitecture_ (MICRO) (pp. 136-152). IEEE.
 
 ---
 

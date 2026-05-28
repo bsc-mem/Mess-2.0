@@ -39,6 +39,23 @@
 #include <functional>
 #include "Architecture.h"
 
+/**
+ * @file ArchitectureRegistry.h
+ * @brief Registration and lookup support for architecture plugins.
+ */
+
+/**
+ * @brief Global registry of architecture factories.
+ */
+/**
+ * @brief Singleton registry for architecture-specific code generation backends.
+ * 
+ * Uses a Factory pattern to maintain a list of supported `Architecture` implementations 
+ * (e.g., `X86Architecture`, `ArmArchitecture`). During initialization, modules register their 
+ * factories here. At runtime, the registry evaluates the detected `CPUCapabilities` to instantiate 
+ * the correct architecture plugin capable of producing valid inline assembly and configuring 
+ * the appropriate hardware counters.
+ */
 class ArchitectureRegistry {
 public:
     static ArchitectureRegistry& instance();
@@ -52,6 +69,9 @@ private:
     std::vector<std::function<std::unique_ptr<Architecture>()>> factories_;
 };
 
+/**
+ * @brief Helper that registers an architecture type during static initialization.
+ */
 template<typename T>
 struct ArchitectureRegistrar {
     ArchitectureRegistrar() {

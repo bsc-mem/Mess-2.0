@@ -36,9 +36,24 @@
 
 #include "architecture/BandwidthCounterStrategy.h"
 
+/**
+ * @file SiFiveCounters.h
+ * @brief SiFive-specific RISC-V counter strategy.
+ */
+
+/** @brief Counter discovery strategy for SiFive RISC-V systems. */
 class SiFiveCounters : public BandwidthCounterStrategy {
 public:
+    /**
+     * @brief Detects and returns the appropriate IMC counters.
+     * @see RiscvCounters::detectCasCounters() for detailed explanation.
+     */
     CasCounterSelection detectCasCounters() override;
+
+    /**
+     * @brief Retrieves the raw event codes for TLB miss counters.
+     * @see RiscvCounters::getTlbMissCounters() for detailed explanation.
+     */
     void getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) override;
 };
 

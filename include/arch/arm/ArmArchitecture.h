@@ -37,6 +37,12 @@
 #include "architecture/Architecture.h"
 #include "architecture/ISA.h"
 
+/**
+ * @file ArmArchitecture.h
+ * @brief ARM architecture plugin.
+ */
+
+/** @brief Architecture plugin for AArch64 systems. */
 class ArmArchitecture : public Architecture {
 public:
     std::string getName() const override { return "arm64"; }
@@ -45,11 +51,29 @@ public:
     }
 
     std::unique_ptr<KernelAssembler> createAssembler(const KernelConfig& config) const override;
+
+    /**
+     * @brief Instantiates the appropriate bandwidth counter strategy for the detected ARM system.
+     * 
+     * 
+     * @param caps The hardware capabilities detected at runtime.
+     * @return std::unique_ptr<BandwidthCounterStrategy> The selected counter strategy.
+     */
     std::unique_ptr<BandwidthCounterStrategy> createCounterStrategy(const CPUCapabilities& caps) const override;
     
     std::vector<std::shared_ptr<ISA>> getSupportedISAs() const override;
     std::shared_ptr<ISA> selectBestISA(const CPUCapabilities& /*caps*/) const override;
     
+
+    /**
+     * @brief Retrieves the system-specific UPI (interconnect) scaling factor for bandwidth calculations.
+     * 
+     * Interconnect performance counters often require a scaling multiplier to compute the actual
+     * byte transfer rate. This value is highly dependent on the specific ARM SoC architecture.
+     * 
+     * @param caps The hardware capabilities detected at runtime.
+     * @return double The scaling factor to apply to UPI counter values.
+     */
     double getUpiScalingFactor(const CPUCapabilities&) const override;
 };
 

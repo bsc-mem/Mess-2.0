@@ -35,14 +35,49 @@
 #define ARM_COUNTERS_H
 
 #include "architecture/BandwidthCounterStrategy.h"
-#include "system_detection.h"
+#include "SystemDetection.h"
 #include <string>
 
+/**
+ * @file ArmCounters.h
+ * @brief Generic ARM counter strategy.
+ */
+
+/** @brief Counter discovery strategy for ARM systems. */
 class ArmCounters : public BandwidthCounterStrategy {
 public:
+    ArmCounters() = default;
     explicit ArmCounters(const CPUCapabilities& caps);
+    /**
+     * @brief Detects and returns the appropriate CAS counters.
+     * 
+     * The term "CAS" is retained for historical reasons, but this function generally identifies 
+     * the specific performance monitoring counters (often IMC counters) required to measure 
+     * memory bandwidth for the current architecture.
+     * 
+     * @return CasCounterSelection The selected counters and their configuration.
+     */
     CasCounterSelection detectCasCounters() override;
+
+    /**
+     * @brief Retrieves the raw event codes for TLB (Translation Lookaside Buffer) miss counters.
+     * 
+     * 
+     * @param tlb1_raw Reference to store the first TLB miss counter event code.
+     * @param tlb2_raw Reference to store the second TLB miss counter event code.
+     * @param use_tlb1 Reference to a boolean indicating if the first counter should be used.
+     * @param use_tlb2 Reference to a boolean indicating if the second counter should be used.
+     */
     void getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) override;
+
+    // slot1 = page-walks, slot2 = L1D refills; STLB hits derived as (slot2 - slot1).
+    double computeTlbOverheadNs(double slot1, double slot2,
+                                double /*freq_ghz*/,
+                                double stlb_hit_latency_ns) const override {
+        double stlb_hits = (slot2 > slot1) ? (slot2 - slot1) : 0.0;
+        return countBasedTlbOverheadNs(slot1, stlb_hits,
+                                       stlb_hit_latency_ns, getPageWalkLatencyNs());
+    }
 };
 
 #endif

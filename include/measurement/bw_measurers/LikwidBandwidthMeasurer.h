@@ -34,11 +34,19 @@
 #ifndef LIKWID_BANDWIDTH_MEASURER_H
 #define LIKWID_BANDWIDTH_MEASURER_H
 
-#include "measurement.h"
+#include "Measurement.h"
 #include <string>
 #include <vector>
 #include <map>
 
+/**
+ * @file LikwidBandwidthMeasurer.h
+ * @brief LIKWID-based implementation of the bandwidth measurer interface.
+ */
+
+/**
+ * @brief Samples memory bandwidth through `likwid-perfctr`.
+ */
 class LikwidBandwidthMeasurer : public BandwidthMeasurer {
 public:
     using BandwidthMeasurer::BandwidthMeasurer;
@@ -54,16 +62,19 @@ public:
     std::string build_event_string(const std::string& likwidCmd, const std::string& memType, CounterType type) const;
 
 private:
+    /** @brief Counter names resolved for one LIKWID memory channel. */
     struct MemoryChannel {
         std::string readCounter;
         std::string writeCounter;
     };
 
+    /** @brief Counter names resolved for one LIKWID UPI channel. */
     struct UpiChannel {
         std::string readCounter;
         std::string writeCounter;
     };
 
+    /** @brief Extra event mapping resolved from user-requested counters. */
     struct ResolvedExtraEvent {
         std::string eventName;
         std::string boxType;

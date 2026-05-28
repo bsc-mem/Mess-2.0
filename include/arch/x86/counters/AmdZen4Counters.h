@@ -34,12 +34,21 @@
 #ifndef AMD_ZEN4_COUNTERS_H
 #define AMD_ZEN4_COUNTERS_H
 
-#include "architecture/BandwidthCounterStrategy.h"
+#include "x86/counters/AmdZenCounters.h"
 
-class AmdZen4Counters : public BandwidthCounterStrategy {
+/**
+ * @file AmdZen4Counters.h
+ * @brief AMD Zen 4 counter strategy.
+ */
+
+/** @brief Counter discovery strategy for AMD Zen 4 systems. */
+class AmdZen4Counters : public AmdZenCounters {
 public:
+    /**
+     * @brief Detects and returns the appropriate IMC counters for AMD Zen 4.
+     * @see X86Counters::detectCasCounters() for detailed explanation.
+     */
     CasCounterSelection detectCasCounters() override;
-    void getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) override;
 };
 
 #endif

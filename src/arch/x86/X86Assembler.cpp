@@ -32,6 +32,46 @@
  */
 
 #include "arch/x86/X86Assembler.h"
+#include <algorithm>
+
+namespace {
+
+AddressingPolicy resolveAddressingPolicy(const KernelConfig& config) {
+    if (config.addressing_policy == AddressingPolicy::AUTO) {
+        // x86 has no post-increment memory addressing mode; default to indexed.
+        return AddressingPolicy::INDEXED;
+    }
+    return config.addressing_policy;
+}
+
+int x86BytesPerOp(ISAMode mode) {
+    if (mode == ISAMode::SCALAR) {
+        return 8;
+    }
+    if (mode == ISAMode::SSE2) {
+        return 16;
+    }
+    return (mode == ISAMode::AVX512) ? 64 : 32;
+}
+
+const char* x86VectorRegPrefix(ISAMode mode) {
+    if (mode == ISAMode::AVX512) return "zmm";
+    if (mode == ISAMode::SSE2) return "xmm";
+    return "ymm";
+}
+
+const char* x86VectorLoadInstr(ISAMode mode) {
+    return (mode == ISAMode::SSE2) ? "movupd" : "vmovupd";
+}
+
+const char* x86VectorStoreInstr(ISAMode mode, bool nontemporal) {
+    if (mode == ISAMode::SSE2) {
+        return nontemporal ? "movntpd" : "movupd";
+    }
+    return nontemporal ? "vmovntpd" : "vmovupd";
+}
+
+}
 
 static const char* getScalarRegName(int reg) {
     static const char* regs[] = {"rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r13", "r14"};
@@ -40,24 +80,51 @@ static const char* getScalarRegName(int reg) {
 
 std::string X86Assembler::generateLoad(int offset, int reg) const {
     std::ostringstream oss;
+    AddressingPolicy policy = resolveAddressingPolicy(config_);
+
     if (config_.isa_mode == ISAMode::SCALAR) {
-        oss << "        \"movq      " << offset << "(%%r11,%%rbx,8), %%" << getScalarRegName(reg) << ";\\n\"\n";
+        if (policy == AddressingPolicy::POST_INCREMENT) {
+            oss << "        \"movq      (%%r11), %%" << getScalarRegName(reg) << ";\\n\"\n"
+                << "        \"addq      $8, %%r11;\\n\"\n";
+        } else {
+            oss << "        \"movq      " << offset << "(%%r11,%%rbx,8), %%" << getScalarRegName(reg) << ";\\n\"\n";
+        }
     } else {
-        bool avx512 = (config_.isa_mode == ISAMode::AVX512);
-        oss << "        \"vmovupd   " << offset << "(%%r11,%%rbx,8), %%" << (avx512 ? "zmm" : "ymm") << reg << ";\\n\"\n";
+        const char* instr = x86VectorLoadInstr(config_.isa_mode);
+        const char* prefix = x86VectorRegPrefix(config_.isa_mode);
+        if (policy == AddressingPolicy::POST_INCREMENT) {
+            int bytes = x86BytesPerOp(config_.isa_mode);
+            oss << "        \"" << instr << "   (%%r11), %%" << prefix << reg << ";\\n\"\n"
+                << "        \"addq      $" << bytes << ", %%r11;\\n\"\n";
+        } else {
+            oss << "        \"" << instr << "   " << offset << "(%%r11,%%rbx,8), %%" << prefix << reg << ";\\n\"\n";
+        }
     }
     return oss.str();
 }
 
 std::string X86Assembler::generateStore(int offset, int reg) const {
     std::ostringstream oss;
+    AddressingPolicy policy = resolveAddressingPolicy(config_);
+
     if (config_.isa_mode == ISAMode::SCALAR) {
         const char* instr = config_.use_nontemporal_stores ? "movnti" : "movq";
-        oss << "        \"" << instr << "    %%" << getScalarRegName(reg) << ", " << offset << "(%%r10,%%rbx,8);\\n\"\n";
+        if (policy == AddressingPolicy::POST_INCREMENT) {
+            oss << "        \"" << instr << "    %%" << getScalarRegName(reg) << ", (%%r10);\\n\"\n"
+                << "        \"addq      $8, %%r10;\\n\"\n";
+        } else {
+            oss << "        \"" << instr << "    %%" << getScalarRegName(reg) << ", " << offset << "(%%r10,%%rbx,8);\\n\"\n";
+        }
     } else {
-        const char* instr = config_.use_nontemporal_stores ? "vmovntpd" : "vmovupd";
-        bool avx512 = (config_.isa_mode == ISAMode::AVX512);
-        oss << "        \"" << instr << "  %%" << (avx512 ? "zmm" : "ymm") << "1, " << offset << "(%%r10,%%rbx,8);\\n\"\n";
+        const char* instr = x86VectorStoreInstr(config_.isa_mode, config_.use_nontemporal_stores);
+        const char* prefix = x86VectorRegPrefix(config_.isa_mode);
+        if (policy == AddressingPolicy::POST_INCREMENT) {
+            int bytes = x86BytesPerOp(config_.isa_mode);
+            oss << "        \"" << instr << "  %%" << prefix << reg << ", (%%r10);\\n\"\n"
+                << "        \"addq      $" << bytes << ", %%r10;\\n\"\n";
+        } else {
+            oss << "        \"" << instr << "  %%" << prefix << reg << ", " << offset << "(%%r10,%%rbx,8);\\n\"\n";
+        }
     }
     return oss.str();
 }
@@ -75,10 +142,15 @@ std::string X86Assembler::generateLoopControl(int increment, int labelId) const 
 }
 
 std::string X86Assembler::generatePause() const {
-    return "        \"movq      %%r15, %%rdi;\\n\"\n"
-           "\n"
-           "        \"call      nop;\\n\"\n"
-           "\n";
+    // Avoid function call overhead for pause==0 by inlining the delay loop.
+    return "        \"movl      (%%r15), %%edi;\\n\"\n"
+           "        \"testl     %%edi, %%edi;\\n\"\n"
+           "        \"jz        2f;\\n\"\n"
+           "        \"1:\\n\"\n"
+           "        \"nop;\\n\"\n"
+           "        \"decl      %%edi;\\n\"\n"
+           "        \"jnz       1b;\\n\"\n"
+           "        \"2:\\n\"\n";
 }
 
 std::string X86Assembler::generateHeader() const {
@@ -98,10 +170,6 @@ std::string X86Assembler::generateHeader() const {
 }
 
 std::string X86Assembler::generateRegisterSetup() const {
-    bool avx512 = (config_.isa_mode == ISAMode::AVX512);
-    std::string vreg = avx512 ? "zmm0" : "ymm0";
-    std::string zero_instr = avx512 ? "vpxorq %%zmm0, %%zmm0, %%zmm0;\\n" : "vxorpd %%ymm0, %%ymm0, %%ymm0;\\n";
-    
     return "    register double *a asm(\"r10\");\n"
            "    a = a_array;\n"
            "    register double *b asm(\"r11\");\n"
@@ -118,8 +186,13 @@ std::string X86Assembler::generateVectorRegisterInit() const {
     if (config_.isa_mode == ISAMode::SCALAR) {
         return "";
     }
-    bool avx512 = (config_.isa_mode == ISAMode::AVX512);
-    return std::string("        \"") + (avx512 ? "vpxorq %%zmm1, %%zmm1, %%zmm1" : "vxorpd %%ymm1, %%ymm1, %%ymm1") + ";\\n\"\n\n";
+    if (config_.isa_mode == ISAMode::AVX512) {
+        return "        \"vpxorq %%zmm1, %%zmm1, %%zmm1;\\n\"\n\n";
+    }
+    if (config_.isa_mode == ISAMode::SSE2) {
+        return "        \"xorpd %%xmm1, %%xmm1;\\n\"\n\n";
+    }
+    return "        \"vxorpd %%ymm1, %%ymm1, %%ymm1;\\n\"\n\n";
 }
 
 std::string X86Assembler::generateFooter() const {

@@ -36,9 +36,35 @@
 
 #include "architecture/BandwidthCounterStrategy.h"
 
+/**
+ * @file RiscvCounters.h
+ * @brief Generic RISC-V counter strategy.
+ */
+
+/** @brief Counter discovery strategy for generic RISC-V systems. */
 class RiscvCounters : public BandwidthCounterStrategy {
 public:
+    /**
+     * @brief Detects and returns the appropriate CAS counters for RISC-V.
+     * 
+     * The "CAS" naming is historical. This function queries the RISC-V hardware performance 
+     * monitors (HPM) to identify the available counters required to measure memory bandwidth.
+     * 
+     * @return CasCounterSelection The selected counters and their configuration.
+     */
     CasCounterSelection detectCasCounters() override;
+
+    /**
+     * @brief Retrieves the raw event codes for RISC-V TLB miss counters.
+     * 
+     * This function provides the RISC-V specific event codes needed to monitor
+     * TLB misses, leveraging the standard RISC-V performance monitoring events where available.
+     * 
+     * @param tlb1_raw Reference to store the first TLB miss counter event code.
+     * @param tlb2_raw Reference to store the second TLB miss counter event code.
+     * @param use_tlb1 Reference to a boolean indicating if the first counter should be used.
+     * @param use_tlb2 Reference to a boolean indicating if the second counter should be used.
+     */
     void getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) override;
 };
 

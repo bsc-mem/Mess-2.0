@@ -32,14 +32,23 @@
  */
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 #ifndef ARRAY_ELEMS
 #pragma message "ARRAY_ELEMS not defined. Using the default value."
 #define ARRAY_ELEMS {{ARRAY_ELEMS_VALUE}}
 #endif
 
+#ifndef ACTIVE_ARRAY_ELEMS
+#define ACTIVE_ARRAY_ELEMS ARRAY_ELEMS
+#endif
+
+#ifndef CACHE_LINE
+#define CACHE_LINE {{PTRCHASE_CACHE_LINE_VALUE}}
+#endif
+
 struct line{
     struct line *next;
-    int pad[14];
+    uint8_t pad[CACHE_LINE-8];
 };
 
 int *res;
@@ -62,33 +71,37 @@ void shuffle(int *array, size_t n) {
 }
 
 void walk_generator(){
-    int *indices = (int*)malloc(ARRAY_ELEMS * sizeof(int));
+    int *indices = (int*)malloc(ACTIVE_ARRAY_ELEMS * sizeof(int));
     if (!indices) {
         printf("Memory allocation failed for indices\n");
         exit(1);
     }
 
     size_t i;
-    for(i = 0; i < ARRAY_ELEMS; i++){
+    for(i = 0; i < ACTIVE_ARRAY_ELEMS; i++){
         indices[i] = i;
     }
 
-    shuffle(indices, ARRAY_ELEMS);
+    shuffle(indices, ACTIVE_ARRAY_ELEMS);
 
-    for(i = 0; i < ARRAY_ELEMS - 1; i++){
+    for (i = 0; i < ARRAY_ELEMS; i++) {
+        array[i].next = &array[i];
+    }
+
+    for(i = 0; i < ACTIVE_ARRAY_ELEMS - 1; i++){
         res[indices[i]] = indices[i+1];
     }
-    res[indices[ARRAY_ELEMS - 1]] = indices[0];
+    res[indices[ACTIVE_ARRAY_ELEMS - 1]] = indices[0];
 
-    for(int j = 0; j < ARRAY_ELEMS; j++){
-        array[j].next = (struct line *) ((long)res[j] * 64);
+    for(int j = 0; j < ACTIVE_ARRAY_ELEMS; j++){
+        array[j].next = (struct line *) ((long)res[j] * CACHE_LINE);
     }
     
     free(indices);
 }
 
 int main() {
-    res = (int*)malloc(ARRAY_ELEMS * sizeof(int));
+    res = (int*)malloc(ACTIVE_ARRAY_ELEMS * sizeof(int));
     array = (struct line*)malloc(ARRAY_ELEMS * sizeof(struct line));
     
     if (!res || !array) {
@@ -110,6 +123,7 @@ int main() {
     free(res);
     free(array);
 
-    printf("Generated random walk data for %d elements\n", ARRAY_ELEMS);
+    printf("Generated random walk data for %d active elements out of %d allocated\n",
+           ACTIVE_ARRAY_ELEMS, ARRAY_ELEMS);
     return 0;
 }

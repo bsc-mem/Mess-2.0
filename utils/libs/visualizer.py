@@ -6,29 +6,38 @@ import numpy as np
 import matplotlib.patches as patches
 import seaborn as sns
 from matplotlib.lines import Line2D
-from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.colors import Normalize
 
 fontSizeMess = 24
 
+def _is_intel_pcm_config(config):
+    if not isinstance(config, dict):
+        return False
+
+    explicit_marker = str(config.get("IS_INTEL_PCM", "")).strip().lower()
+    if explicit_marker in ("1", "true", "yes", "y"):
+        return True
+
+    for key in ("MEASURER", "BW_TOOL", "BW_MEASURER", "COUNTER_SOURCE"):
+        value = str(config.get(key, "")).strip().lower()
+        if "pcm" in value:
+            return True
+
+    for key in ("READ_EVENT", "WRITE_EVENT", "READ_EVENTS", "WRITE_EVENTS", "BW_EVENT"):
+        value = str(config.get(key, "")).strip().lower()
+        if "pcm_cxl/" in value or "pcm_cxl_" in value:
+            return True
+
+    return False
+
 def calculate_color(rw, cmap_name='Blues'):
-    """Returns a color based on read-write ratio using specified colormap
-       Higher rw → lighter color, lower rw → darker color.
-       Contrast between darkest and lightest shades increased.
-    """
+    """Map RW ratio to Blues using legacy intensity bounds (no near-white curves)."""
     cmap = plt.colormaps[cmap_name]
 
-    # Define the min and max positions in the colormap (0=darkest, 1=lightest)
-    min_val = 0.1  # darkest used
-    max_val = 1  # lightest used
-
-    # Clip rw to 0-100 just in case
-    rw_clipped = max(50.0, min(100.0, rw))
-
-    # Normalize rw to 0-1
-    normalized = rw_clipped / 100.0
-
-    # Invert for higher rw → lighter color
-    c = max_val - (max_val - min_val) * normalized
+    rw_clipped = max(50.0, min(100.0, float(rw)))
+    # Keep the same direction as legend labels: 100 on the left, 50 on the right.
+    # Legacy plotters did not use the near-white end of the colormap.
+    c = 0.2 + ((100.0 - rw_clipped) / 50.0) * 0.8
 
     return cmap(c)
 
@@ -86,56 +95,72 @@ def add_gradient_legend(ax, label, rw_min=0, rw_max=100, colors=None, box_positi
 
 
 
-def filter_clustered_points(df, bw_tolerance_gb=8.0):
+def filter_clustered_points(
+    df,
+    bw_tolerance_gb=2.0,
+    min_latency_increase_percent=5.0,   
+    bw_col='bandwidth_smooth',
+    lat_col='latency_smooth'
+):
     """
-    Keep only points that are at least `bw_tolerance_gb` apart in bandwidth.
-    Preserves monotonicity and overall shape.
+    Keep points where:
+    - bandwidth increases by at least bw_tolerance_gb
+    - AND smoothed latency increases by at least min_latency_increase_percent %
     """
     if df.empty or len(df) <= 1:
         return df
-
-    df = df.sort_values('bandwidth_smooth').reset_index(drop=True)
     
-    keep_idx = [0]  # Always keep first point
-    last_bw = df.iloc[0]['bandwidth_smooth']
-
+    if bw_col not in df.columns or lat_col not in df.columns:
+        return df
+    
+    df = df.sort_values(bw_col).reset_index(drop=True)
+    
+    keep_idx = [0]
+    last_bw = df.iloc[0][bw_col]
+    last_lat = df.iloc[0][lat_col]
+    
+    threshold = min_latency_increase_percent / 100.0 
+    
     for i in range(1, len(df)):
-        current_bw = df.iloc[i]['bandwidth_smooth']
-        if current_bw - last_bw >= bw_tolerance_gb:
+        current_bw = df.iloc[i][bw_col]
+        current_lat = df.iloc[i][lat_col]
+        
+        bw_ok = current_bw - last_bw >= bw_tolerance_gb
+        
+        lat_ok = False
+        if last_lat > 0 and current_lat > last_lat:
+            increase_ratio = (current_lat - last_lat) / last_lat
+            lat_ok = increase_ratio >= threshold
+        
+        if bw_ok and lat_ok:
             keep_idx.append(i)
             last_bw = current_bw
-
-    # Always keep the last point (important for high-BW saturation)
-    if keep_idx[-1] != len(df) - 1:
-        keep_idx.append(len(df) - 1)
-
+            last_lat = current_lat
+    
     return df.iloc[keep_idx].reset_index(drop=True)
 
 def is_valid_curve(df,
-                   min_points=5,
+                   min_points=10,
                    max_cluster_fraction=0.4,
                    gap_fraction=0.5,        # NEW: max allowed jump in GB/s
                    bw_column='bandwidth_mean',
                    ignore_guards=False):
-    """
-    Comprehensive validity check:
-    - Spans enough bandwidth
-    - Not a tight cluster
-    - No huge straight-line jumps (artifacts)
-    """
 
     if ignore_guards:
         return True, "valid (forced)"
 
-    if df.empty or len(df) < min_points:
-        return False, "too_few_points"
+    if bw_column not in df.columns:
+        if 'bandwidth_smooth' in df.columns:
+            bw_column = 'bandwidth_smooth'
+        elif 'bandwidth_mean' in df.columns:
+            bw_column = 'bandwidth_mean'
+        elif 'bandwidth' in df.columns:
+            bw_column = 'bandwidth'
+        else:
+            return False, "missing_bandwidth_column"
 
     bw = df[bw_column].dropna()
-    if len(bw) < min_points:
-        return False, "too_few_valid_bw"
 
-    if (df['bandwidth_mean'].max() - df['bandwidth_mean'].min()) < 80: 
-        return False, "cluster of dots, not valid as a curve"
     # Check for large horizontal jumps
     bw_sorted = np.sort(bw)
     gaps = np.diff(bw_sorted)
@@ -147,31 +172,15 @@ def is_valid_curve(df,
     if max_gap > max_horizontal_gap:
         return False, f"large_jump ({max_gap:.1f} > {max_horizontal_gap} GB/s)"
 
-    # Check for clustering (optional but recommended)
-    if max_cluster_fraction < 1.0:
-        window = 50.0
-        # Use rolling count on sorted values
-        counts_in_windows = []
-        for i in range(len(bw_sorted)):
-            window_count = np.sum((bw_sorted >= bw_sorted[i]) & (bw_sorted <= bw_sorted[i] + window))
-            counts_in_windows.append(window_count)
-
-        if max(counts_in_windows) / len(bw) > max_cluster_fraction:
-            return False, "too_clustered"
 
     return True, "valid"
 
 
-
-def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blues', limit_bw_override=None, limit_lat_override=None, ignore_guards=False):
-    """Plot bandwidth-latency curves and save to PDF"""
-    if not dfs_rw:
-        print("No data to plot")
-        return
-    
-    fig, ax = plt.subplots(1, 1)
-    
+def _compute_theoretical_max_bw(config):
     try:
+        if _is_intel_pcm_config(config):
+            return 72.0
+
         nvlink_bw_str = config.get("NVLINK_BW_GB_S", None)
         nvlink_bw = float(nvlink_bw_str) if nvlink_bw_str is not None else None
 
@@ -187,7 +196,7 @@ def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blue
                 flit_bit = float(config.get("FLIT_BIT", 80))
                 data_flit_bit = float(config.get("DATA_FLIT_BIT", 64))
                 n_upi_channels = float(config.get("N_UPI_CHANNELS", 4))
-                
+
                 if data_flit_bit > 0 and flit_bit > 0:
                     max_bw = 2.0 * (upi_freq * n_lanes * (data_flit_bit / flit_bit) * n_upi_channels) / 8.0
                 else:
@@ -198,19 +207,33 @@ def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blue
                     freq = float(freq_str.split()[0])
                 else:
                     freq = 0
-                    
+
                 channels = float(config.get("N_CHANNELS", 2))
-                bus_width = float(config.get("BUS_WIDTH", 64)) 
-                
+                bus_width = float(config.get("BUS_WIDTH", 64))
+
                 if bus_width > 0 and freq > 0:
-                     max_bw = (bus_width / 8) * freq * channels / 1000.0
+                    max_bw = (bus_width / 8) * freq * channels / 1000.0
                 else:
-                     max_bw = 0
+                    max_bw = 0
     except (ValueError, AttributeError):
         max_bw = 0
+
+    return max_bw
+
+
+
+def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blues', limit_bw_override=None, limit_lat_override=None, ignore_guards=False, apply_corrections=True, y_label=None, draw_dots=False):
+    """Plot bandwidth-latency curves and save to PDF"""
+    if not dfs_rw:
+        print("No data to plot")
+        return
+    
+    fig, ax = plt.subplots(1, 1)
+    
+    max_bw = _compute_theoretical_max_bw(config)
     
     ax.set_xlabel('Used Memory bandwidth [GB/s]', fontsize=fontSizeMess + 3)
-    ax.set_ylabel('Memory access latency [ns]', fontsize=fontSizeMess + 3)
+    ax.set_ylabel(y_label or 'Memory access latency [ns]', fontsize=fontSizeMess + 3)
 
     sorting_list = []
     processed_dfs = {}
@@ -221,7 +244,10 @@ def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blue
     
     for rw, df in dfs_rw.items():
         if not df.empty:
-            df_clean = filter_clustered_points(df.copy(), 5.0)
+            if apply_corrections:
+                df_clean = filter_clustered_points(df.copy(), 1.0, bw_col='bandwidth_smooth')
+            else:
+                df_clean = df.copy()
             processed_dfs[rw] = df_clean
             
             if 'bandwidth_smooth' in df_clean.columns and not df_clean['bandwidth_smooth'].empty:
@@ -235,9 +261,7 @@ def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blue
     limit_bw = limit_bw_override
     if limit_bw is None:
         if max_bw > 0:
-            limit_bw = max_bw
-            if global_max_bw > limit_bw:
-                 limit_bw = global_max_bw * 1.1
+            limit_bw = max_bw * 1.1
         else:
             limit_bw = global_max_bw * 1.1 if global_max_bw > 0 else 321
 
@@ -248,24 +272,34 @@ def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blue
     ax.set_xlim([0, limit_bw])
     ax.set_ylim([0, limit_lat])
 
-    sorted_ratios = [rw for rw, _ in sorted(sorting_list, key=lambda x: x[1])]
+    marker = 'o' if draw_dots else None
+    markersize = 4 if draw_dots else None
+
+    sorted_ratios = [rw for rw, _ in sorted(sorting_list, key=lambda x: x[0])]
     for rw in sorted_ratios:
         df = processed_dfs[rw]
         if not df.empty:
-            is_valid, reason = is_valid_curve(
-                df,
-                min_points=5,
-                max_cluster_fraction=0.70,
-                gap_fraction=0.5,
-                ignore_guards=ignore_guards)
-            if is_valid: 
+            if (not apply_corrections) or ignore_guards:
                 ax.plot(df['bandwidth_smooth'], df['latency_smooth'], 
-                    color=calculate_color(rw, cmap_name), linewidth=2, 
+                    color=calculate_color(rw, cmap_name), linewidth=1,
+                    marker=marker, markersize=markersize,
                     label=f'Rd:Wr {rw}:0')
             else: 
-                if reason not in skipped_ratios:
-                    skipped_ratios[reason] = []
-                skipped_ratios[reason].append(rw)
+                is_valid, reason = is_valid_curve(
+                    df,
+                    min_points=5,
+                    max_cluster_fraction=0.70,
+                    gap_fraction=0.7,
+                    ignore_guards=False)
+                if is_valid:
+                    ax.plot(df['bandwidth_smooth'], df['latency_smooth'], 
+                        color=calculate_color(rw, cmap_name), linewidth=1,
+                        marker=marker, markersize=markersize,
+                        label=f'Rd:Wr {rw}:0')
+                else:
+                    if reason not in skipped_ratios:
+                        skipped_ratios[reason] = []
+                    skipped_ratios[reason].append(rw)
 
     for reason, ratios in skipped_ratios.items():
         #print(f"Warning: Ratios {ratios} not plotted: {reason}")
@@ -279,7 +313,7 @@ def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blue
     should_draw_max_bw_line = not (is_nvidia_pmu and nvlink_bw == 0)
 
     if max_bw > 0 and should_draw_max_bw_line:
-        ax.axvline(x=max_bw, color='red', linewidth=2, linestyle=':')
+        ax.axvline(x=max_bw, color=calculate_color(75, cmap_name), linewidth=2, linestyle=':')
         ax.text(x=max_bw, y=ax.get_ylim()[1] * 0.95, 
                s=f'Max. theoretical BW = {max_bw} GB/s', 
                horizontalalignment='right', fontsize=fontSizeMess - 4)
@@ -288,7 +322,7 @@ def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blue
     
     base_x = 0.1
     base_y = 0.99
-    add_gradient_legend(ax, None, 50, 100, colors=cmap_name,box_position=(base_x, base_y), box_size=(0.25, 0.03), fontsize=20)
+    add_gradient_legend(ax, None, 50, 100, colors=cmap_name, box_position=(base_x, base_y), box_size=(0.25, 0.03), fontsize=20)
 
     fig.set_size_inches([16, 9])
     with warnings.catch_warnings():
@@ -302,7 +336,9 @@ def plot_curves(config, dfs_rw, output_path='memory_curves.pdf', cmap_name='Blue
     #print(f"Plot saved to: {output_path}")
     #print(f"Plot saved to: {png_path}")
 
-def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_override=None, limit_lat_override=None, ignore_guards=False):
+
+
+def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_override=None, limit_lat_override=None, ignore_guards=False, apply_corrections=True, draw_dots=False):
     """
     Plot multiple datasets on the same figure.
     datasets: list of tuples (label, dfs_rw, config, cmap_name)
@@ -313,47 +349,17 @@ def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_o
 
     fig, ax = plt.subplots(1, 1)
     
-    max_bw = 0
+    max_bw = 0.0
     global_max_bw = 0.0
     global_max_lat = 0.0
-    try:
-        for _, dfs_rw, cfg, _, _ in datasets:
-            nvlink_bw_str = cfg.get("NVLINK_BW_GB_S", None)
-            nvlink_bw = float(nvlink_bw_str) if nvlink_bw_str is not None else None
-
-            if nvlink_bw is not None and nvlink_bw == 0:
-                pass
-            elif nvlink_bw is not None and nvlink_bw > 0:
-                max_bw = max(max_bw, nvlink_bw)
-            else:
-                binding = cfg.get("MEMORY_BINDING", "local").strip().lower()
-                if binding == "remote":
-                    upi_freq = float(cfg.get("UPI_FREQ", 16))
-                    n_lanes = float(cfg.get("N_DATA_LANES", 20))
-                    flit_bit = float(cfg.get("FLIT_BIT", 80))
-                    data_flit_bit = float(cfg.get("DATA_FLIT_BIT", 64))
-                    n_upi_channels = float(cfg.get("N_UPI_CHANNELS", 4))
-                    if data_flit_bit > 0 and flit_bit > 0:
-                        max_bw = max(max_bw, 2.0 * (upi_freq * n_lanes * (data_flit_bit / flit_bit) * n_upi_channels) / 8.0)
-                else:
-                    freq_str = cfg.get("MEM_FREQ", "")
-                    if freq_str and "Could not detect" not in freq_str:
-                        freq = float(freq_str.split()[0])
-                    else:
-                        freq = 0
-                    channels = float(cfg.get("N_CHANNELS", 2))
-                    bus_width = float(cfg.get("BUS_WIDTH", 64))
-                    if bus_width > 0 and freq > 0:
-                        max_bw = max(max_bw, (bus_width / 8) * freq * channels / 1000.0)
-
-            for _, df in dfs_rw.items():
-                if not df.empty:
-                    if 'bandwidth_smooth' in df.columns and not df['bandwidth_smooth'].empty:
-                        global_max_bw = max(global_max_bw, df['bandwidth_smooth'].max())
-                    if 'latency_smooth' in df.columns and not df['latency_smooth'].empty:
-                        global_max_lat = max(global_max_lat, df['latency_smooth'].max())
-    except (ValueError, AttributeError):
-        max_bw = max_bw if max_bw else 0
+    for _, dfs_rw, cfg, _, _ in datasets:
+        max_bw = max(max_bw, _compute_theoretical_max_bw(cfg))
+        for _, df in dfs_rw.items():
+            if not df.empty:
+                if 'bandwidth_smooth' in df.columns and not df['bandwidth_smooth'].empty:
+                    global_max_bw = max(global_max_bw, df['bandwidth_smooth'].max())
+                if 'latency_smooth' in df.columns and not df['latency_smooth'].empty:
+                    global_max_lat = max(global_max_lat, df['latency_smooth'].max())
     datasets = sorted(
         datasets,
         key=lambda d: max(
@@ -377,9 +383,7 @@ def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_o
     limit_bw = limit_bw_override
     if limit_bw is None:
         if max_bw > 0:
-            limit_bw = max_bw
-            if global_max_bw > limit_bw:
-                 limit_bw = global_max_bw * 1.1
+            limit_bw = max_bw * 1.1
         else:
             limit_bw = global_max_bw * 1.1 if global_max_bw > 0 else 321
 
@@ -397,6 +401,9 @@ def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_o
 
     # Vertical spacing between boxes (in axes fraction)
     vertical_step = 0.08
+    marker = 'o' if draw_dots else None
+    markersize = 4 if draw_dots else None
+
     # Plot each dataset
     for i, (label, dfs_rw, _, cmap_name, _) in enumerate(datasets):
         y_pos = base_y - i * vertical_step
@@ -410,45 +417,32 @@ def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_o
         for rw in sorted_ratios:
             df = dfs_rw[rw]
             if not df.empty:
-                df = filter_clustered_points(df.copy(), 5.0)
+                if apply_corrections:
+                    df = filter_clustered_points(df.copy(), 5.0)
+                else:
+                    df = df.copy()
                 
-                is_valid, reason = is_valid_curve(
-                    df,
-                    min_points=5,
-                    max_cluster_fraction=0.70,
-                    gap_fraction=0.5,
-                    ignore_guards=ignore_guards)
-                if is_valid:
+                if (not apply_corrections) or ignore_guards:
                     curve_label = f'{label} (Rd:Wr {rw}:0)' if first_curve else None
                     first_curve = False
                     ax.plot(df['bandwidth_smooth'], df['latency_smooth'], color=calculate_color(rw, cmap_name),
-                           label=curve_label, alpha=1.0)
-                    # Plot dots
-                    #ax.scatter(
-                    #    df['bandwidth_smooth'],
-                    #    df['latency_smooth'],
-                    #    s=12,          # dot size — ONLY here
-                    #    color="Black",
-                    #    alpha=0.8
-                    #)
-                    #for x, y,  pause_value in zip(
-                    #df['bandwidth_smooth'],
-                    #df['latency_smooth'],
-                    #df['pause']              # same here
-                    #):
-                    #    ax.text(
-                    #        x, y,
-                    #        f"{rw},{pause_value}",
-                    #        fontsize=6,
-                    #        color="Black",
-                    #        alpha=0.8,
-                    #        ha='left',
-                    #        va='bottom'
-                    #        )
+                           linewidth=1, marker=marker, markersize=markersize, label=curve_label, alpha=1.0)
                 else:
-                    if reason not in skipped_ratios:
-                        skipped_ratios[reason] = []
-                    skipped_ratios[reason].append(rw)
+                    is_valid, reason = is_valid_curve(
+                        df,
+                        min_points=5,
+                        max_cluster_fraction=0.70,
+                        gap_fraction=0.5,
+                        ignore_guards=False)
+                    if is_valid:
+                        curve_label = f'{label} (Rd:Wr {rw}:0)' if first_curve else None
+                        first_curve = False
+                        ax.plot(df['bandwidth_smooth'], df['latency_smooth'], color=calculate_color(rw, cmap_name),
+                               linewidth=1, marker=marker, markersize=markersize, label=curve_label, alpha=1.0)
+                    else:
+                        if reason not in skipped_ratios:
+                            skipped_ratios[reason] = []
+                        skipped_ratios[reason].append(rw)
         
         for reason, ratios in skipped_ratios.items():
             ratio_values = [int(r) for r in ratios]
@@ -485,3 +479,177 @@ def plot_combined_curves(datasets, output_path='combined_curves.pdf', limit_bw_o
     
     #print(f"Combined plot saved to: {output_path}")
     #print(f"Combined plot saved to: {png_path}")
+
+
+def plot_combined_metric_curves(datasets, metric_col, y_label,
+                                output_path='combined_metric_curves.pdf',
+                                limit_bw_override=None, limit_metric_override=None,
+                                ignore_guards=False, apply_corrections=True, draw_dots=False):
+    """Plot one metric for multiple datasets on the same figure."""
+    if not datasets:
+        return
+
+    fig, ax = plt.subplots(1, 1)
+
+    max_bw = 0.0
+    global_max_bw = 0.0
+    global_max_metric = 0.0
+
+    for _, dfs_rw, cfg, _, _ in datasets:
+        max_bw = max(max_bw, _compute_theoretical_max_bw(cfg))
+        for _, df in dfs_rw.items():
+            if df.empty or 'bandwidth_plot' not in df.columns:
+                continue
+            value_col = 'metric_plot' if 'metric_plot' in df.columns else metric_col
+            if value_col not in df.columns:
+                continue
+            df_local = df.dropna(subset=['bandwidth_plot', value_col])
+            if df_local.empty:
+                continue
+            global_max_bw = max(global_max_bw, df_local['bandwidth_plot'].max())
+            global_max_metric = max(global_max_metric, df_local[value_col].max())
+
+    limit_bw = limit_bw_override
+    if limit_bw is None:
+        if max_bw > 0:
+            limit_bw = max_bw * 1.1
+        else:
+            limit_bw = global_max_bw * 1.1 if global_max_bw > 0 else 321
+
+    limit_metric = limit_metric_override
+    if limit_metric is None:
+        limit_metric = global_max_metric * 1.15 if global_max_metric > 0 else 1.0
+        if limit_metric <= 0:
+            limit_metric = 1.0
+
+    ax.set_xlim([0, limit_bw])
+    ax.set_ylim([0, limit_metric])
+    ax.set_xlabel('Used Memory bandwidth [GB/s]', fontsize=fontSizeMess + 3)
+    ax.set_ylabel(y_label, fontsize=fontSizeMess + 3)
+
+    base_x = 0.1
+    base_y = 0.99
+    vertical_step = 0.08
+
+    marker = 'o' if draw_dots else None
+    markersize = 4 if draw_dots else None
+
+    for i, (label, dfs_rw, _, cmap_name, _) in enumerate(datasets):
+        y_pos = base_y - i * vertical_step
+        add_gradient_legend(ax, label, 50, 100, colors=cmap_name,
+                            box_position=(base_x, y_pos), box_size=(0.25, 0.03), fontsize=20)
+
+        sorted_ratios = sorted(dfs_rw.keys())
+        first_curve = True
+        for rw in sorted_ratios:
+            df = dfs_rw[rw]
+            if df.empty or 'bandwidth_plot' not in df.columns:
+                continue
+
+            value_col = 'metric_plot' if 'metric_plot' in df.columns else metric_col
+            if value_col not in df.columns:
+                continue
+
+            if apply_corrections:
+                df = filter_clustered_points(df.copy(), 5.0, bw_col='bandwidth_plot')
+            else:
+                df = df.copy()
+            df = df.dropna(subset=['bandwidth_plot', value_col])
+            if df.empty:
+                continue
+
+            if (not apply_corrections) or ignore_guards:
+                curve_label = f'{label} (Rd:Wr {rw}:0)' if first_curve else None
+                first_curve = False
+                ax.plot(df['bandwidth_plot'], df[value_col],
+                        color=calculate_color(rw, cmap_name),
+                        linewidth=1, marker=marker, markersize=markersize, label=curve_label, alpha=1.0)
+            else:
+                is_valid, _ = is_valid_curve(
+                    df,
+                    min_points=5,
+                    max_cluster_fraction=0.70,
+                    gap_fraction=0.5,
+                    bw_column='bandwidth_plot',
+                    ignore_guards=False)
+                if is_valid:
+                    curve_label = f'{label} (Rd:Wr {rw}:0)' if first_curve else None
+                    first_curve = False
+                    ax.plot(df['bandwidth_plot'], df[value_col],
+                            color=calculate_color(rw, cmap_name),
+                            linewidth=1, marker=marker, markersize=markersize, label=curve_label, alpha=1.0)
+
+    is_any_nvidia_pmu = any(cfg.get("USE_NVIDIA_PMU", "False").lower() in ('true', '1', 't') for _, _, cfg, _, _ in datasets)
+    any_nvlink_bw = any(float(cfg.get("NVLINK_BW_GB_S", 0)) > 0 for _, _, cfg, _, _ in datasets)
+    should_draw_max_bw_line = not (is_any_nvidia_pmu and not any_nvlink_bw)
+
+    if max_bw > 0 and should_draw_max_bw_line:
+        ax.axvline(x=max_bw, color=calculate_color(75), linewidth=2, linestyle=':')
+        ax.text(x=max_bw, y=limit_metric * 0.95,
+                s=f'Max. theoretical BW = {int(max_bw)} GB/s',
+                horizontalalignment='right', fontsize=fontSizeMess - 4)
+
+    ax.tick_params(axis='both', labelsize=fontSizeMess)
+
+    fig.set_size_inches([16, 9])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig.tight_layout()
+    fig.savefig(output_path, bbox_inches='tight', dpi=300)
+    png_path = os.path.splitext(output_path)[0] + '.png'
+    fig.savefig(png_path, bbox_inches='tight', dpi=300)
+    plt.close()
+
+
+def check_smooth_curves(df_rw,
+                       gap_fraction=0.4,
+                       bw_column='bandwidth_mean',
+                       group_column='read_pct_rounded',
+                       ignore_guards=False):
+
+    if ignore_guards:
+        return True, "valid (forced)"
+
+    # Ensure we have the right bandwidth column
+    if bw_column not in df_rw.columns:
+        if 'bandwidth_smooth' in df_rw.columns:
+            bw_column = 'bandwidth_smooth'
+        elif 'bandwidth_mean' in df_rw.columns:
+            bw_column = 'bandwidth_mean'
+        elif 'bandwidth' in df_rw.columns:
+            bw_column = 'bandwidth'
+        else:
+            return False, "missing_bandwidth_column"
+
+    smooth = True
+    problematic_groups = []
+    # GROUP BY read percentage → each curve
+    if 'read_pct_rounded' not in df_rw.columns: 
+        group_column="rd_percentage"
+    for read_pct, group in df_rw.groupby(group_column):
+
+        bw = group[bw_column].dropna()
+
+        if len(bw) < 2:
+            continue  # nothing to compare
+
+        # Sort values
+        bw_sorted = np.sort(bw)
+
+        # Compute gaps
+        gaps = np.diff(bw_sorted)
+        max_gap = gaps.max()
+        span = bw_sorted.max() - bw_sorted.min()
+
+        # Avoid division issues if flat curve
+        if span == 0:
+            continue
+
+        max_allowed_gap = span * gap_fraction
+
+        if max_gap > max_allowed_gap:
+            smooth = False
+            problematic_groups.append(read_pct)
+
+    return smooth, problematic_groups
+

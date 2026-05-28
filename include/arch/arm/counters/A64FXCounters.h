@@ -34,12 +34,34 @@
 #ifndef A64FX_COUNTERS_H
 #define A64FX_COUNTERS_H
 
-#include "architecture/BandwidthCounterStrategy.h"
+#include "arm/ArmCounters.h"
 
-class A64FXCounters : public BandwidthCounterStrategy {
+/**
+ * @file A64FXCounters.h
+ * @brief Fujitsu A64FX counter strategy.
+ */
+
+/** @brief Counter discovery strategy for Fujitsu A64FX systems. */
+class A64FXCounters : public ArmCounters {
 public:
+    /**
+     * @brief Detects and returns the appropriate IMC counters.
+     * @see ArmCounters::detectCasCounters() for detailed explanation.
+     */
     CasCounterSelection detectCasCounters() override;
+
+    /**
+     * @brief Retrieves the raw event codes for TLB miss counters.
+     * @see ArmCounters::getTlbMissCounters() for detailed explanation.
+     */
     void getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) override;
+
+    /**
+     * @brief Returns the page-walk latency for A64FX.
+     * Whenever we don't have a measurable per-walk latency, we return -1.0.
+     * This value will be used to disable the page-walk term in the latency formula.
+     */
+    double getPageWalkLatencyNs() const override { return -1.0; }
 };
 
 #endif

@@ -34,12 +34,14 @@
 #include "arch/x86/counters/IntelSPRCounters.h"
 
 CasCounterSelection IntelSPRCounters::detectCasCounters() {
-    return discoverFromPerf();
+    return discoverCasCountersForRequestedMeasurer();
 }
 
 void IntelSPRCounters::getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) {
-    tlb1_raw = 0x1012;
-    tlb2_raw = 0x2012;
+    // Intel Sapphire Rapids memory PMU events (kernel JSON):
+    //   https://github.com/torvalds/linux/blob/master/tools/perf/pmu-events/arch/x86/sapphirerapids/memory.json
+    tlb1_raw = 0x1012;  // DTLB_LOAD_MISSES.WALK_PENDING: "Cycles when at least one PMH is busy with a page walk for a load"
+    tlb2_raw = 0x2012;  // DTLB_LOAD_MISSES.STLB_HIT:    "Loads that miss the DTLB and hit the STLB"
     use_tlb1 = true;
     use_tlb2 = true;
 }

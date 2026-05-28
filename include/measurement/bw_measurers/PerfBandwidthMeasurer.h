@@ -34,8 +34,16 @@
 #ifndef PERF_BANDWIDTH_MEASURER_H
 #define PERF_BANDWIDTH_MEASURER_H
 
-#include "measurement.h"
+#include "Measurement.h"
 
+/**
+ * @file PerfBandwidthMeasurer.h
+ * @brief `perf`-based implementation of the bandwidth measurer interface.
+ */
+
+/**
+ * @brief Samples memory bandwidth using Linux `perf`.
+ */
 class PerfBandwidthMeasurer : public BandwidthMeasurer {
 public:
     using BandwidthMeasurer::BandwidthMeasurer;

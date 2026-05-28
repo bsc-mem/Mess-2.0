@@ -35,8 +35,16 @@
 #define ISA_H
 
 #include <string>
-#include "kernel_types.h"
+#include "KernelTypes.h"
 
+/**
+ * @file ISA.h
+ * @brief Describes one ISA backend exposed by an architecture plugin.
+ */
+
+/**
+ * @brief Metadata for one ISA mode that can be selected for code generation.
+ */
 class ISA {
 public:
     virtual ~ISA() = default;

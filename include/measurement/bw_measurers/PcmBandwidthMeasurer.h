@@ -34,8 +34,17 @@
 #ifndef PCM_BANDWIDTH_MEASURER_H
 #define PCM_BANDWIDTH_MEASURER_H
 
-#include "measurement.h"
+#include "Measurement.h"
+#include <string>
 
+/**
+ * @file PcmBandwidthMeasurer.h
+ * @brief Intel PCM-based implementation of the bandwidth measurer interface.
+ */
+
+/**
+ * @brief Samples memory bandwidth through Intel PCM.
+ */
 class PcmBandwidthMeasurer : public BandwidthMeasurer {
 public:
     using BandwidthMeasurer::BandwidthMeasurer;
@@ -43,6 +52,15 @@ public:
     bool sample_bandwidth(long long& cas_rd, long long& cas_wr, double& elapsed, const std::vector<int>& mem_nodes) const override;
 
     bool wait_for_stabilization(int& samples_collected, long long& bw_cas_rd, long long& bw_cas_wr, double& bw_elapsed, int pause, int ratio_pct, bool reuse_existing_traffic_gen, std::function<void()> on_sample_callback = nullptr) override;
+
+    bool monitor_command(const std::string& command,
+                         MonitorCallback callback,
+                         bool summary_mode) override;
+
+    std::string find_pcm_binary() const;
+
+private:
+    mutable std::string cached_pcm_binary_;
 };
 
 #endif

@@ -34,8 +34,9 @@
 #include "measurement/bw_measurers/LikwidBandwidthMeasurer.h"
 #include "architecture/BandwidthCounterStrategy.h"
 #include "architecture/ArchitectureRegistry.h"
-#include "system_detection.h"
-#include "utils.h"
+#include "SystemDetection.h"
+#include "Utils.h"
+#include "utils/SubprocessCapture.h"
 #include "measurement/BandwidthStabilizer.h"
 #include <iostream>
 #include <fstream>
@@ -52,6 +53,7 @@
 #include <chrono>
 #include <sys/select.h>
 #include <sys/time.h>
+#include <signal.h>
 
 std::string LikwidBandwidthMeasurer::find_likwid_binary() const {
     if (!cached_likwid_binary_.empty()) {
@@ -158,20 +160,18 @@ std::vector<LikwidBandwidthMeasurer::ResolvedExtraEvent> LikwidBandwidthMeasurer
         resolved.eventName = eventName;
 
         std::string command = "\"" + likwidCmd + "\" -E " + eventName + " 2>&1";
-        FILE* pipe = popen(command.c_str(), "r");
-        if (!pipe) {
+        // Quick per-event probe — hardened so a stuck likwid binary cannot
+        // hang counter discovery. Distinguish spawn failure (warn) from
+        // an empty/zero-match response (silently skip) to match the old
+        // popen-based behavior.
+        const subprocess::Result probe = subprocess::capture_shell(command);
+        if (probe.spawn_failed) {
             if (verbose3) {
                 std::cerr << "    Warning: Failed to run likwid-perfctr -E " << eventName << std::endl;
             }
             continue;
         }
-
-        std::string output;
-        char buffer[4096];
-        while (fgets(buffer, sizeof(buffer), pipe)) {
-            output += buffer;
-        }
-        pclose_success(pipe);
+        const std::string& output = probe.output;
 
         std::regex foundRegex(R"(Found\s+(\d+)\s+event\(s\))");
         std::smatch foundMatch;
@@ -375,15 +375,14 @@ std::string LikwidBandwidthMeasurer::build_event_string(const std::string& likwi
     }
 
     std::string command = "\"" + likwidCmd + "\" -e 2>&1";
-    FILE* pipe = popen(command.c_str(), "r");
-    if (!pipe) return "";
-    
-    std::string output;
-    char buffer[4096];
-    while (fgets(buffer, sizeof(buffer), pipe)) {
-        output += buffer;
-    }
-    pclose_success(pipe);
+    // likwid-perfctr -e dumps the full event catalog — on Intel/AMD this
+    // can run to ~150 KiB. Raise the cap so the table isn't truncated.
+    subprocess::Options event_list_opts;
+    event_list_opts.timeout          = std::chrono::seconds(10);
+    event_list_opts.max_output_bytes = 262144;
+    const subprocess::Result probe = subprocess::capture_shell(command, event_list_opts);
+    if (probe.spawn_failed) return "";
+    const std::string& output = probe.output;
 
     std::stringstream eventString;
     
@@ -475,7 +474,7 @@ std::pair<std::string, CounterType> LikwidBandwidthMeasurer::determine_memory_ty
     std::string model(sys_info_.cpu_model);
     std::string arch(sys_info_.arch);
     
-    if (tech == "HBM" || tech.find("HBM") != std::string::npos) {
+    if (BandwidthCounterStrategy::instance().is_hbm() || tech == "HBM" || tech.find("HBM") != std::string::npos) {
         memType = "HBM";
     } else if (vendor.find("AMD") != std::string::npos) {
         memType = "AMD_DF";
@@ -760,7 +759,7 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
     if (eventString.empty()) return false;
 
     std::string intervalStr = std::to_string(static_cast<int>(sampling_interval_ms_)) + "ms";
-    std::string cmd = "\"" + likwidCmd + "\" -f -c 0 -O -g " + eventString + " -t " + intervalStr + " sleep 3600 2>&1";
+    std::string cmd = "echo \"__PID__$$\" && exec \"" + likwidCmd + "\" -f -c 0 -O -g " + eventString + " -t " + intervalStr + " sleep 3600 2>&1";
     
     if (verbose4) std::cout << "[LIKWID] Likwid command: " << cmd << std::endl;
 
@@ -790,8 +789,11 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
     health_checker.is_pid_alive = [this](int pid) -> bool {
         return traffic_gen_manager_->is_traffic_gen_running(pid);
     };
-    health_checker.count_running_instances = []() -> int {
-        return TrafficGenHealthChecker::count_taskset_traffic_gen();
+    health_checker.count_running_instances = [this]() -> int {
+        if (!traffic_gen_manager_) {
+            return TrafficGenHealthChecker::count_taskset_traffic_gen();
+        }
+        return static_cast<int>(traffic_gen_manager_->traffic_gen_worker_pids().size());
     };
     health_checker.expected_instance_count = expected_cores;
 
@@ -815,6 +817,19 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
 
     setbuf(pipe, NULL);
     int pipe_fd = fileno(pipe);
+
+    pid_t likwid_pid = -1;
+    {
+        char pid_buf[128];
+        if (fgets(pid_buf, sizeof(pid_buf), pipe)) {
+            const char* marker = strstr(pid_buf, "__PID__");
+            if (marker) likwid_pid = static_cast<pid_t>(atol(marker + 7));
+        }
+    }
+    auto kill_and_pclose = [&]() {
+        if (likwid_pid > 0) kill(likwid_pid, SIGTERM);
+        pclose_success(pipe);
+    };
 
     size_t window_size = fast_resume ? 5 : (type == CounterType::UPI_FLITS ? 10 : 7);
     BandwidthStabilizer stabilizer(
@@ -943,13 +958,13 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
                     std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     continue;
                 } else {
-                    pclose_success(pipe);
+                    kill_and_pclose();
                     return false;
                 }
             }
 
             if (total_samples > 500) {
-                pclose_success(pipe);
+                kill_and_pclose();
                 traffic_gen_manager_->kill_all_traffic_gen();
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 samples_taken = total_samples;
@@ -964,7 +979,7 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
                 if (config_.verbosity >= 2) {
                     std::cout << "    [ZOMBIE] TrafficGen died, aborting stabilization" << '\n';
                 }
-                pclose_success(pipe);
+                kill_and_pclose();
                 samples_taken = total_samples;
                 return false;
             }
@@ -997,7 +1012,7 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
         }
     }
 
-    pclose_success(pipe);
+    kill_and_pclose();
 
     if (success) {
         long long aggregate_cas_rd = 0;
@@ -1016,7 +1031,6 @@ bool LikwidBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long lo
             std::cerr << "       2. Traffic is not flowing through the monitored UPI links." << '\n';
             std::cerr << "       3. Likwid is not configured correctly for this architecture." << '\n';
             std::cerr << "       Aborting benchmark to prevent invalid results." << '\n';
-            pclose_success(pipe);
             return false;
         }
 

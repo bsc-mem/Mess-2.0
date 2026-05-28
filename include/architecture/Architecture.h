@@ -37,14 +37,22 @@
 #include <string>
 #include <vector>
 #include <memory>
-#include "system_info.h"
-#include "system_detection.h"
-#include "kernel_types.h"
+#include "SystemInfo.h"
+#include "SystemDetection.h"
+#include "KernelTypes.h"
+
+/**
+ * @file Architecture.h
+ * @brief Abstract interface implemented by each supported architecture plugin.
+ */
 
 class ISA;
 class KernelAssembler;
 class BandwidthCounterStrategy;
 
+/**
+ * @brief Factory and policy interface for one CPU architecture family.
+ */
 class Architecture {
 public:
     virtual ~Architecture() = default;
@@ -58,8 +66,9 @@ public:
     virtual std::vector<std::shared_ptr<ISA>> getSupportedISAs() const = 0;
     virtual std::shared_ptr<ISA> selectBestISA(const CPUCapabilities& caps) const = 0;
     
-    // Returns multiplier to convert raw interconnect units to cache-line-equivalent traffic.
-    // For local-memory counters this should normally be 1.0.
+    /**
+     * @brief Returns the scaling factor needed to convert remote-memory counters into cache-line-equivalent traffic.
+     */
     virtual double getUpiScalingFactor(const CPUCapabilities& caps) const = 0;
 };
 

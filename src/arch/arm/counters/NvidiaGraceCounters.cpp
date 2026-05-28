@@ -32,21 +32,17 @@
  */
 
 #include "arch/arm/counters/NvidiaGraceCounters.h"
-#include <unistd.h>
+#include "utils/PmuSysfs.h"
 
 CasCounterSelection NvidiaGraceCounters::detectCasCounters() {
     std::vector<std::string> read_events;
     std::vector<std::string> write_events;
-    
-    for (int i = 0; i < 16; ++i) {
-        std::string pmu_name = "nvidia_scf_pmu_" + std::to_string(i);
-        std::string pmu_path = "/sys/bus/event_source/devices/" + pmu_name;
-        if (access((pmu_path + "/type").c_str(), F_OK) == 0) {
-            read_events.push_back(pmu_name + "/cmem_rd_data/");
-            write_events.push_back(pmu_name + "/cmem_wr_total_bytes/");
-        } else if (!read_events.empty()) {
-            break;
-        }
+
+    // Probe contiguous nvidia_scf_pmu_<i> instances. enumerate_indexed
+    // preserves the historical "stop at the first gap after a hit" semantics.
+    for (const auto& pmu : pmu_sysfs::enumerate_indexed("nvidia_scf_pmu", 16)) {
+        read_events.push_back(pmu + "/cmem_rd_data/");
+        write_events.push_back(pmu + "/cmem_wr_total_bytes/");
     }
     
     if (!read_events.empty() && !write_events.empty()) {
@@ -58,12 +54,15 @@ CasCounterSelection NvidiaGraceCounters::detectCasCounters() {
         return selection;
     }
     
-    return discoverFromPerf();
+    return discoverCasCountersForRequestedMeasurer();
 }
 
 void NvidiaGraceCounters::getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) {
-    tlb1_raw = 0x2012;
-    tlb2_raw = 0x1008;
+    // Grace = Neoverse V2;
+    // Neoverse/Cortex TLB events as Graviton3:
+    //   https://developer.arm.com/documentation/PJDOC-466751330-593177/latest
+    tlb1_raw = 0x34;  // DTLB_WALK:           "Access to data TLB causes a translation table walk"
+    tlb2_raw = 0x4c;  // L1D_TLB_REFILL_RD:   "Attributable L1 data TLB refill, read"
     use_tlb1 = true;
     use_tlb2 = true;
 }

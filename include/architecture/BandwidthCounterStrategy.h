@@ -37,11 +37,20 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <memory>
 #include <cstdint>
 #include <cstdio>
 
+/**
+ * @file BandwidthCounterStrategy.h
+ * @brief Counter discovery abstractions for bandwidth and TLB measurements.
+ */
+
 struct CPUCapabilities;
 
+/**
+ * @brief Fully resolved perf event descriptor.
+ */
 struct ResolvedPerfEvent {
     std::string name;
     uint32_t type = 0;
@@ -53,6 +62,9 @@ struct ResolvedPerfEvent {
     ResolvedPerfEvent(const std::string& n) : name(n) {}
 };
 
+/**
+ * @brief Selection of UPI/remote-memory events for one configuration.
+ */
 struct UpiFlitSelection {
     bool perf_available = false;
     std::string failure_reason;
@@ -68,6 +80,7 @@ struct UpiFlitSelection {
     std::string get_all_events_string() const;
 };
 
+/** @brief Categories of bandwidth counters supported by Mess. */
 enum class CounterType {
     CAS_COUNT,
     UPI_FLITS,
@@ -75,16 +88,21 @@ enum class CounterType {
     UNKNOWN
 };
 
+/** @brief Supported measurement backends. */
 enum class MeasurerType {
     AUTO,
     PERF,
     LIKWID,
+    VTUNE,
     PCM
 };
 
 std::string measurer_type_to_string(MeasurerType type);
 MeasurerType string_to_measurer_type(const std::string& str);
 
+/**
+ * @brief Read/write counter selection for local-memory bandwidth measurement.
+ */
 struct CasCounterSelection {
     bool perf_available = false;
     std::string failure_reason;
@@ -92,10 +110,12 @@ struct CasCounterSelection {
     std::vector<std::string> read_events;
     std::vector<std::string> write_events;
     std::vector<std::string> combined_events;
+    std::vector<std::string> read_subtract_events;
 
     bool has_read_write = false;
     bool has_combined_counter = false;
     bool requires_channel_aggregation = false;
+    bool uses_read_subtract_formula = false;
 
     std::string get_read_events_string() const;
     std::string get_write_events_string() const;
@@ -104,6 +124,9 @@ struct CasCounterSelection {
     std::string get_popen_events_string() const;
 };
 
+/**
+ * @brief Full bandwidth counter selection, including optional extra counters.
+ */
 struct BandwidthCounterSelection {
     bool perf_available = false;
     std::string failure_reason;
@@ -121,6 +144,9 @@ struct BandwidthCounterSelection {
     bool is_valid() const;
 };
 
+/**
+ * @brief Classifies parsed event values into read, write, combined, or extra buckets.
+ */
 struct EventClassification {
     bool is_read = false;
     bool is_write = false;
@@ -135,6 +161,9 @@ struct EventClassification {
     static void reset_extra_values(std::map<std::string, long long>& target);
 };
 
+/**
+ * @brief Base class for architecture-specific counter discovery strategies.
+ */
 class BandwidthCounterStrategy {
 public:
     static BandwidthCounterStrategy& instance();
@@ -184,18 +213,52 @@ protected:
     static bool readPmuCpumask(const std::string& pmu_path, int& cpu);
     
     static std::vector<std::string> extractCasEventsFromPerf();
+    static std::vector<std::string> extractCasEventsFromVtune();
     static std::vector<std::string> extractUpiFlitEventsFromPerf();
+    static std::vector<std::string> extractUpiFlitEventsFromVtune();
     static std::string lookupEventEncoding(const std::string& event_name);
     
     static CasCounterSelection discoverFromPerf();
     static CasCounterSelection discoverFromPerf(const std::vector<std::string>& preferred_read, const std::vector<std::string>& preferred_write, const std::vector<std::string>& preferred_combined);
+    static CasCounterSelection discoverFromVtune();
+    static CasCounterSelection discoverFromVtune(const std::vector<std::string>& preferred_read, const std::vector<std::string>& preferred_write, const std::vector<std::string>& preferred_combined);
     static UpiFlitSelection discoverUpiFlitsFromPerf();
+    static UpiFlitSelection discoverUpiFlitsFromVtune();
+
+    CasCounterSelection discoverCasCountersForRequestedMeasurer() const;
+    CasCounterSelection discoverCasCountersForRequestedMeasurer(const std::vector<std::string>& preferred_read, const std::vector<std::string>& preferred_write, const std::vector<std::string>& preferred_combined) const;
 
 public:
     virtual ~BandwidthCounterStrategy() = default;
-    
+
     virtual CasCounterSelection detectCasCounters() = 0;
     virtual void getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) = 0;
+
+    virtual double computeTlbOverheadNs(double slot1, double slot2,
+                                        double freq_ghz,
+                                        double stlb_hit_latency_ns) const {
+        double pagewalk_ns = (freq_ghz > 0.0) ? (slot1 / freq_ghz) : 0.0;
+        return pagewalk_ns + stlb_hit_latency_ns * slot2;
+    }
+
+    virtual std::string formatTlbEventName(int /*slot*/, uint64_t raw_code) const {
+        return formatTlbEventString(raw_code);
+    }
+
+    /**
+     * @brief Returns the page walk latency for A64FX.
+     * Whenever we don't have a measurable per-walk latency, we return -1.0.
+     * This value will be used to disable the page-walk term in the latency formula.
+     */
+    virtual double getPageWalkLatencyNs() const { return -1.0; }
+
+protected:
+    static double countBasedTlbOverheadNs(double pagewalks, double stlb_hits,
+                                          double stlb_hit_latency_ns,
+                                          double page_walk_latency_ns) {
+        double pw_ns = (page_walk_latency_ns > 0.0) ? page_walk_latency_ns * pagewalks : 0.0;
+        return pw_ns + stlb_hit_latency_ns * stlb_hits;
+    }
 
 private:
     BandwidthCounterStrategy(const BandwidthCounterStrategy&) = delete;
@@ -203,14 +266,19 @@ private:
 
     void resolve_measurer_type();
 
+protected:
     bool initialized_ = false;
     bool is_hbm_ = false;
     int cached_src_cpu_ = 0;
     std::vector<int> target_nodes_;
     std::string cached_memory_type_;
+    bool cached_targets_cxl_nodes_ = false;
     std::vector<std::string> extra_counters_;
+    std::unique_ptr<BandwidthCounterStrategy> delegate_strategy_;
     MeasurerType requested_measurer_type_ = MeasurerType::AUTO;
     MeasurerType resolved_measurer_type_ = MeasurerType::PERF;
+    MeasurerType auto_selected_measurer_type_ = MeasurerType::PERF;
+    bool cached_is_intel_cpu_ = false;
     BandwidthCounterSelection selection_;
 
     uint64_t cached_tlb1_raw_ = 0;

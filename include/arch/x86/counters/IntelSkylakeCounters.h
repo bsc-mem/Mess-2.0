@@ -36,9 +36,24 @@
 
 #include "architecture/BandwidthCounterStrategy.h"
 
+/**
+ * @file IntelSkylakeCounters.h
+ * @brief Intel Skylake counter strategy.
+ */
+
+/** @brief Counter discovery strategy for Intel Skylake-class systems. */
 class IntelSkylakeCounters : public BandwidthCounterStrategy {
 public:
+    /**
+     * @brief Detects and returns the appropriate IMC counters for Intel Skylake.
+     * @see X86Counters::detectCasCounters() for detailed explanation.
+     */
     CasCounterSelection detectCasCounters() override;
+
+    /**
+     * @brief Retrieves the raw event codes for TLB miss counters on Intel Skylake.
+     * @see X86Counters::getTlbMissCounters() for detailed explanation.
+     */
     void getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) override;
 };
 

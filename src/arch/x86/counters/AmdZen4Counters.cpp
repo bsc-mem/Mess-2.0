@@ -34,18 +34,11 @@
 #include "arch/x86/counters/AmdZen4Counters.h"
 
 CasCounterSelection AmdZen4Counters::detectCasCounters() {
-    auto result = discoverFromPerf();
+    auto result = discoverCasCountersForRequestedMeasurer();
     
     if (!result.has_read_write && !result.has_combined_counter) {
         result.failure_reason = "AMD Zen4 dram_channel_data_controller counters not found";
     }
     
     return result;
-}
-
-void AmdZen4Counters::getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) {
-    tlb1_raw = 0x0F45;
-    tlb2_raw = 0xF045;
-    use_tlb1 = true;
-    use_tlb2 = true;
 }

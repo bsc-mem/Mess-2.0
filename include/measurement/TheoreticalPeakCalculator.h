@@ -33,17 +33,26 @@
 
 #pragma once
 
-#include "system_detection.h"
+#include "SystemDetection.h"
 #include <string>
 #include <cstdlib>
 #include <dirent.h>
 
+/**
+ * @file TheoreticalPeakCalculator.h
+ * @brief Helpers for deriving theoretical and achievable bandwidth ceilings.
+ */
+
+/** @brief Memory binding modes used when computing peak bandwidth. */
 enum class MemoryBindingType {
     LOCAL,
     REMOTE_UPI,
     NVLINK_GRACE
 };
 
+/**
+ * @brief Input parameters for theoretical peak bandwidth calculations.
+ */
 struct TheoreticalPeakConfig {
     MemoryBindingType binding_type = MemoryBindingType::LOCAL;
     
@@ -60,6 +69,9 @@ struct TheoreticalPeakConfig {
     double nvlink_bw_gb_s = 0.0;
 };
 
+/**
+ * @brief Computes local-memory and remote-memory peak bandwidth estimates.
+ */
 class TheoreticalPeakCalculator {
 public:
     static double calculate(const TheoreticalPeakConfig& config) {
@@ -69,7 +81,6 @@ public:
             
             case MemoryBindingType::REMOTE_UPI:
                 if (config.flit_bit > 0 && config.data_flit_bit > 0) {
-                    // UPI bandwidth per direction (not bidirectional - memory traffic flows primarily one way)
                     return (config.upi_freq_gt_s * config.n_data_lanes * 
                            (static_cast<double>(config.data_flit_bit) / config.flit_bit) * 
                            config.n_upi_channels) / 8.0;

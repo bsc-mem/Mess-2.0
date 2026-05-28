@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <string>
 #include <cctype>
+#include <unistd.h>
 
 static ArchitectureRegistrar<ArmArchitecture> arm_registrar;
 
@@ -78,11 +79,11 @@ std::unique_ptr<BandwidthCounterStrategy> ArmArchitecture::createCounterStrategy
                        [](unsigned char c) { return std::tolower(c); });
         return result;
     };
-    
+
     auto modelContains = [&](const std::string& token) {
         return toLower(caps.model_name).find(toLower(token)) != std::string::npos;
     };
-    
+
     if (modelContains("a64fx")) {
         return std::make_unique<A64FXCounters>();
     } else if (modelContains("graviton3") || modelContains("graviton4")) {
@@ -90,7 +91,7 @@ std::unique_ptr<BandwidthCounterStrategy> ArmArchitecture::createCounterStrategy
     } else if (modelContains("grace")) {
         return std::make_unique<NvidiaGraceCounters>(caps);
     }
-    
+
     if (modelContains("fujitsu")) {
         return std::make_unique<A64FXCounters>();
     } else if (modelContains("graviton") || modelContains("neoverse")) {
@@ -98,19 +99,23 @@ std::unique_ptr<BandwidthCounterStrategy> ArmArchitecture::createCounterStrategy
     } else if (modelContains("nvidia")) {
         return std::make_unique<NvidiaGraceCounters>(caps);
     }
-    
+
     return std::make_unique<ArmCounters>(caps);
 }
 
 std::vector<std::shared_ptr<ISA>> ArmArchitecture::getSupportedISAs() const {
     return {
+        makeArmISA(ISAMode::NEON_NATIVE, "NEON_NATIVE", 128, 32),
+        makeArmISA(ISAMode::NEON_PAIR, "NEON_PAIR", 256, 16),
         makeArmISA(ISAMode::SVE, "SVE", 512, 32),
-        makeArmISA(ISAMode::NEON, "NEON", 256, 32)
+        makeArmISA(ISAMode::SVE128, "SVE128", 128, 32),
+        makeArmISA(ISAMode::SVE256, "SVE256", 256, 32),
+        makeArmISA(ISAMode::SVE512, "SVE512", 512, 32)
     };
 }
 
 std::shared_ptr<ISA> ArmArchitecture::selectBestISA(const CPUCapabilities& /*caps*/) const {
-    return makeArmISA(ISAMode::NEON, "NEON", 256, 32);
+    return makeArmISA(ISAMode::NEON_PAIR, "NEON_PAIR", 256, 16);
 }
 
 double ArmArchitecture::getUpiScalingFactor(const CPUCapabilities&) const {

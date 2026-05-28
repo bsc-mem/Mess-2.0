@@ -35,8 +35,9 @@
 #include "measurement/BandwidthStabilizer.h"
 #include "architecture/ArchitectureRegistry.h"
 #include "architecture/BandwidthCounterStrategy.h"
-#include "system_detection.h"
-#include "utils.h"
+#include "SystemDetection.h"
+#include "Utils.h"
+#include "utils/SubprocessCapture.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -48,10 +49,30 @@
 #include <iomanip>
 #include <chrono>
 #include <map>
+#include <cerrno>
 #include <sys/select.h>
 #include <sys/time.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 namespace {
+std::string trim_copy(const std::string& value) {
+    const size_t begin = value.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) {
+        return "";
+    }
+    const size_t end = value.find_last_not_of(" \t\r\n");
+    return value.substr(begin, end - begin + 1);
+}
+
+std::string to_lower_ascii(std::string value) {
+    for (char& ch : value) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value;
+}
+
 std::string make_membind_arg(const std::vector<int>& mem_nodes) {
     if (mem_nodes.empty()) {
         return "0";
@@ -64,6 +85,409 @@ std::string make_membind_arg(const std::vector<int>& mem_nodes) {
     }
     return membind_arg;
 }
+
+int get_perf_bind_cpu() {
+    const auto& cache = SystemToolsCache::instance();
+    return cache.initialized ? cache.ptr_chase_cpu : find_ptr_chase_cpu().first;
+}
+
+bool parse_long_long_token(const std::string& token, long long& value) {
+    const std::string trimmed = trim_copy(token);
+    if (trimmed.empty()) {
+        return false;
+    }
+
+    try {
+        size_t consumed = 0;
+        value = std::stoll(trimmed, &consumed, 10);
+        return consumed == trimmed.size();
+    } catch (...) {
+        return false;
+    }
+}
+
+bool parse_double_token(const std::string& token, double& value) {
+    const std::string trimmed = trim_copy(token);
+    if (trimmed.empty()) {
+        return false;
+    }
+
+    try {
+        size_t consumed = 0;
+        value = std::stod(trimmed, &consumed);
+        return consumed == trimmed.size();
+    } catch (...) {
+        return false;
+    }
+}
+
+bool token_looks_like_event_name(const std::string& token) {
+    const std::string trimmed = trim_copy(token);
+    if (trimmed.empty()) {
+        return false;
+    }
+
+    // Accept canonical PMU-like names and raw encodings (e.g. r17 / r1a2).
+    bool has_name_separator = false;
+    for (unsigned char ch : trimmed) {
+        if (ch == '/' || ch == '_' || ch == '.' || ch == ':' || ch == '-') {
+            has_name_separator = true;
+            break;
+        }
+    }
+    if (has_name_separator) {
+        return true;
+    }
+
+    if ((trimmed.size() >= 2) && (trimmed[0] == 'r' || trimmed[0] == 'R')) {
+        for (size_t i = 1; i < trimmed.size(); ++i) {
+            if (!std::isxdigit(static_cast<unsigned char>(trimmed[i]))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    return trimmed == "cycles" || trimmed == "instructions";
+}
+
+bool token_looks_like_scope_name(const std::string& token) {
+    const std::string trimmed = trim_copy(token);
+    if (trimmed.empty()) {
+        return false;
+    }
+
+    if (trimmed.size() >= 2 && (trimmed[0] == 'S' || trimmed[0] == 's')) {
+        for (size_t i = 1; i < trimmed.size(); ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(trimmed[i]))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (trimmed.size() >= 4 &&
+        (trimmed.rfind("CPU", 0) == 0 || trimmed.rfind("cpu", 0) == 0)) {
+        for (size_t i = 3; i < trimmed.size(); ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(trimmed[i]))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    return false;
+}
+
+bool token_looks_like_metric_unit(const std::string& token) {
+    const std::string trimmed = trim_copy(token);
+    if (trimmed.empty()) {
+        return false;
+    }
+
+    const std::string unit = to_lower_ascii(trimmed);
+    return unit == "b" || unit == "kb" || unit == "mb" || unit == "gb" ||
+           unit == "tb" || unit == "kib" || unit == "mib" || unit == "gib" ||
+           unit == "tib" || unit == "%" || unit == "hz" || unit == "khz" ||
+           unit == "mhz" || unit == "ghz";
+}
+
+struct PerfCsvRow {
+    double timestamp = 0.0;
+    std::string scope;
+    long long value = 0;
+    double metric_value = 0.0;
+    std::string metric_unit;
+    bool has_metric_value = false;
+    std::string event_name;
+    bool has_timestamp = false;
+};
+
+double metric_unit_to_bytes_multiplier(const std::string& unit_raw) {
+    std::string unit = to_lower_ascii(trim_copy(unit_raw));
+    if (unit.empty()) return 0.0;
+
+    const size_t slash = unit.find('/');
+    if (slash != std::string::npos) {
+        unit = unit.substr(0, slash);
+    }
+
+    if (unit == "b") return 1.0;
+    if (unit == "kb") return 1e3;
+    if (unit == "mb") return 1e6;
+    if (unit == "gb") return 1e9;
+    if (unit == "tb") return 1e12;
+    if (unit == "kib") return 1024.0;
+    if (unit == "mib") return 1024.0 * 1024.0;
+    if (unit == "gib") return 1024.0 * 1024.0 * 1024.0;
+    if (unit == "tib") return 1024.0 * 1024.0 * 1024.0 * 1024.0;
+    return 0.0;
+}
+
+long long normalize_perf_row_value(const PerfCsvRow& row, int cache_line_size) {
+    if (!row.has_metric_value) {
+        return row.value;
+    }
+
+    const double bytes_multiplier = metric_unit_to_bytes_multiplier(row.metric_unit);
+    if (bytes_multiplier > 0.0) {
+        const double bytes = row.metric_value * bytes_multiplier;
+        if (cache_line_size > 0) {
+            return static_cast<long long>(std::llround(bytes / static_cast<double>(cache_line_size)));
+        }
+        return static_cast<long long>(std::llround(bytes));
+    }
+
+    return static_cast<long long>(std::llround(row.metric_value));
+}
+
+bool parse_perf_stat_csv_row(const std::string& line, bool expect_timestamp, PerfCsvRow& row) {
+    std::vector<std::string> fields;
+    std::stringstream ss(line);
+    std::string field;
+    while (std::getline(ss, field, ',')) {
+        fields.push_back(trim_copy(field));
+    }
+
+    if (fields.empty()) {
+        return false;
+    }
+
+    row = PerfCsvRow{};
+
+    size_t index = 0;
+    if (expect_timestamp) {
+        if (!parse_double_token(fields[index], row.timestamp)) {
+            return false;
+        }
+        row.has_timestamp = true;
+        ++index;
+    }
+    long long parsed_value = 0;
+
+    auto assign_raw = [&](size_t scope_index, size_t value_index, size_t event_index) -> bool {
+        if (value_index >= fields.size() || event_index >= fields.size()) {
+            return false;
+        }
+        if (!parse_long_long_token(fields[value_index], parsed_value)) {
+            return false;
+        }
+        if (!token_looks_like_event_name(fields[event_index])) {
+            return false;
+        }
+        row.scope = (scope_index < fields.size()) ? fields[scope_index] : "";
+        row.value = parsed_value;
+        row.has_metric_value = false;
+        row.metric_value = 0.0;
+        row.metric_unit.clear();
+        row.event_name = fields[event_index];
+        return true;
+    };
+
+    auto assign_metric = [&](size_t scope_index, size_t metric_value_index, size_t unit_index, size_t event_index) -> bool {
+        if (metric_value_index >= fields.size() || event_index >= fields.size()) {
+            return false;
+        }
+        if (unit_index < fields.size() && !fields[unit_index].empty() &&
+            !token_looks_like_metric_unit(fields[unit_index])) {
+            return false;
+        }
+        if (!token_looks_like_event_name(fields[event_index])) {
+            return false;
+        }
+        double metric_value = 0.0;
+        if (!parse_double_token(fields[metric_value_index], metric_value)) {
+            return false;
+        }
+        row.scope = (scope_index < fields.size()) ? fields[scope_index] : "";
+        row.value = static_cast<long long>(std::llround(metric_value));
+        row.metric_value = metric_value;
+        row.metric_unit = (unit_index < fields.size()) ? fields[unit_index] : "";
+        row.has_metric_value = true;
+        row.event_name = fields[event_index];
+        return true;
+    };
+
+    const bool has_scope = (index < fields.size()) && token_looks_like_scope_name(fields[index]);
+
+    // Most specific first: metric-output rows with explicit raw/runtime fields after event.
+    // Example A:
+    //   time,S0,1,1491.27,MiB,uncore_imc_0/cas_count_read/,51018789,...
+    if (has_scope && assign_metric(index, index + 2, index + 3, index + 4)) {
+        // Ambiguous shape guard: if the parsed "event" token is actually a unit token,
+        // retry with the 7-column scoped metric layout below.
+        if (token_looks_like_metric_unit(row.event_name)) {
+            row = PerfCsvRow{};
+        } else {
+            return true;
+        }
+    }
+    // Example B:
+    //   time,S0,1,1491.27,MiB,uncore_imc_0/cas_count_read/,51018789,...
+    if (has_scope && assign_metric(index, index + 3, index + 4, index + 5)) {
+        return true;
+    }
+    // Example C:
+    //   time,S0,1491.27,MiB,uncore_imc_0/cas_count_read/,51018789,...
+    if (has_scope && assign_metric(index, index + 1, index + 2, index + 3)) {
+        return true;
+    }
+
+    // Old raw-count CSV rows without unit/metric column.
+    // Example:
+    //   time,S0,1,51018789,,uncore_imc_0/cas_count_read/,...
+    if (has_scope && assign_raw(index, index + 2, index + 4)) {
+        return true;
+    }
+    // Example:
+    //   time,S0,51018789,,uncore_imc_0/cas_count_read/,...
+    if (has_scope && assign_raw(index, index + 1, index + 3)) {
+        return true;
+    }
+
+    // PID/system-wide non-scoped rows.
+    // Example:
+    //   time,1491.27,MiB,uncore_imc/cas_count_read/,51018789,...
+    if (!has_scope && assign_metric(fields.size(), index, index + 1, index + 2)) {
+        return true;
+    }
+    // Example:
+    //   time,51018789,,uncore_imc/cas_count_read/,...
+    if (!has_scope && assign_raw(fields.size(), index, index + 2)) {
+        return true;
+    }
+
+    return false;
+}
+
+bool use_per_socket_aggregation(const BandwidthCounterSelection& selection) {
+    if (selection.type != CounterType::CAS_COUNT && selection.type != CounterType::NVIDIA_GRACE) {
+        return true;
+    }
+    return !selection.cas.uses_read_subtract_formula;
+}
+
+std::pair<std::string, std::string> detect_unc_m_aggregate_events() {
+    static std::pair<std::string, std::string> cached;
+    static bool initialized = false;
+    if (initialized) {
+        return cached;
+    }
+    initialized = true;
+
+    // perf list can be hundreds of KiB on big-iron — cap accordingly.
+    subprocess::Options opts;
+    opts.timeout          = std::chrono::seconds(10);
+    opts.max_output_bytes = 262144;
+    const std::string output = subprocess::run_shell("perf list 2>/dev/null", opts);
+
+    std::istringstream stream(output);
+    std::string line;
+    while (std::getline(stream, line)) {
+        std::istringstream ls(line);
+        std::string token;
+        ls >> token;
+        if (token.empty()) {
+            continue;
+        }
+        if (to_lower_ascii(token) == "unc_m_cas_count.rd") {
+            cached.first = "unc_m_cas_count.rd";
+        } else if (to_lower_ascii(token) == "unc_m_cas_count.wr") {
+            cached.second = "unc_m_cas_count.wr";
+        }
+    }
+
+    return cached;
+}
+
+std::string build_preferred_perf_events(const BandwidthCounterSelection& selection) {
+    std::string events = selection.get_all_events_string();
+
+    if (selection.type != CounterType::CAS_COUNT || selection.cas.uses_read_subtract_formula) {
+        return events;
+    }
+
+    const auto agg = detect_unc_m_aggregate_events();
+    if (agg.first.empty() || agg.second.empty()) {
+        return events;
+    }
+
+    std::string preferred = agg.first + "," + agg.second;
+    for (const auto& extra : selection.extra_counters) {
+        if (!extra.empty()) {
+            preferred += ",";
+            preferred += extra;
+        }
+    }
+    return preferred;
+}
+
+bool use_pid_attach_mode(const BandwidthCounterSelection& selection) {
+    return selection.cas.uses_read_subtract_formula;
+}
+
+std::string join_pid_list(const std::vector<pid_t>& pids) {
+    std::string joined;
+    for (size_t i = 0; i < pids.size(); ++i) {
+        if (i > 0) {
+            joined += ",";
+        }
+        joined += std::to_string(pids[i]);
+    }
+    return joined;
+}
+
+bool is_pid_alive(pid_t pid) {
+    if (pid <= 0) {
+        return false;
+    }
+    if (kill(pid, 0) == 0) {
+        return true;
+    }
+    return errno == EPERM;
+}
+
+std::string build_perf_scope_args(const BandwidthCounterSelection& selection,
+                                  const TrafficGenProcessManager* traffic_gen_manager) {
+    if (!use_pid_attach_mode(selection)) {
+        return use_per_socket_aggregation(selection) ? "-a --per-socket" : "-a";
+    }
+
+    if (!traffic_gen_manager) {
+        return "";
+    }
+
+    const std::vector<pid_t> worker_pids = traffic_gen_manager->traffic_gen_worker_pids();
+    if (worker_pids.empty()) {
+        return "";
+    }
+
+    return "-p " + join_pid_list(worker_pids);
+}
+
+void apply_bandwidth_formula(const BandwidthCounterSelection& selection,
+                             long long raw_rd,
+                             long long raw_wr,
+                             const std::map<std::string, long long>& extras,
+                             long long& effective_rd,
+                             long long& effective_wr) {
+    effective_rd = raw_rd;
+    effective_wr = raw_wr;
+
+    if (!selection.cas.uses_read_subtract_formula) {
+        return;
+    }
+
+    long long subtract = 0;
+    for (const auto& event : selection.cas.read_subtract_events) {
+        auto it = extras.find(event);
+        if (it != extras.end()) {
+            subtract += it->second;
+        }
+    }
+
+    effective_rd = std::max(0LL, raw_rd - subtract);
+}
 }
 
 bool PerfBandwidthMeasurer::sample_bandwidth(long long& cas_rd, long long& cas_wr, double& elapsed, const std::vector<int>& mem_nodes) const {
@@ -72,6 +496,9 @@ bool PerfBandwidthMeasurer::sample_bandwidth(long long& cas_rd, long long& cas_w
 
 bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_wr, double& elapsed, const std::vector<int>& mem_nodes) const {
     const bool verbose4 = config_.verbosity >= 4;
+    extra_perf_values_.clear();
+    ensure_scaling_factor_cached();
+    const int cache_line_size = std::max(1, cached_cache_line_size_);
 
     int interval = static_cast<int>(sampling_interval_ms_);
     
@@ -88,12 +515,29 @@ bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_
         return false;
     }
 
-    std::string events_str = selection.get_all_events_string();
+    std::string events_str = build_preferred_perf_events(selection);
+    const int perf_bind_cpu = get_perf_bind_cpu();
+    const bool attach_mode = use_pid_attach_mode(selection);
+    const std::string scope_args = build_perf_scope_args(selection, traffic_gen_manager_);
+    if (scope_args.empty()) {
+        if (attach_mode) {
+            std::cerr << "ERROR: No TrafficGen worker PIDs available for A64FX perf sampling." << std::endl;
+        }
+        return false;
+    }
 
-    std::string cmd = std::string("cd ") + storage_->bandwidth_dir() +
-                      " && stdbuf -oL -eL numactl -C 0 --membind=" + membind_arg +
-                      " perf stat -I " + std::to_string(interval) +
-                      " -a --per-socket -x, -e " + events_str + " 2>&1";
+    ensure_a64fx_pmu_available();
+
+    std::string cmd = std::string("cd ") + storage_->bandwidth_dir() + " && echo \"__PID__$$\" && exec stdbuf -oL -eL ";
+    if (!attach_mode) {
+        (void)perf_bind_cpu;
+        (void)membind_arg;
+        // For system-wide perf stat (-a/--per-socket), avoid numactl wrapping.
+        // Some Emerald Rapids/CXL setups can hang with:
+        //   numactl ... perf stat -a --per-socket ...
+    }
+    cmd += "perf stat -I " + std::to_string(interval) +
+           " -x, " + scope_args + " -e " + events_str + " 2>&1";
 
     if(verbose4){std::cout << "[SAMPLING CMD] " << cmd << '\n';}
 
@@ -103,6 +547,22 @@ bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_
     }
 
     setbuf(pipe, NULL);
+
+    pid_t perf_stat_pid = -1;
+    char pid_buf[256];
+    if (fgets(pid_buf, sizeof(pid_buf), pipe)) {
+        const char* marker = strstr(pid_buf, "__PID__");
+        if (marker) {
+            perf_stat_pid = static_cast<pid_t>(atol(marker + 7));
+        }
+    }
+
+    if (verbose4) {
+        std::cout << "      [PERF DEBUG] attach_mode=" << (attach_mode ? "yes" : "no")
+                  << ", scope=\"" << scope_args << "\""
+                  << ", perf_pid=" << perf_stat_pid << '\n';
+        std::cout << "      [PERF DEBUG] command: " << cmd << '\n';
+    }
 
     char buffer[4096];
     long long current_sample_rd = 0, current_sample_wr = 0, current_sample_combined = 0;
@@ -122,18 +582,19 @@ bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_
             continue;
         }
 
-        double timestamp;
-        char socket[16];
-        int core_count;
-        long long value;
-        char event_name[256];
-
-        if (sscanf(buffer, "%lf,%15[^,],%d,%lld,,%255[^,]", &timestamp, socket, &core_count, &value, event_name) == 5) {
-            if (strcmp(socket, "S1") == 0) {
+        PerfCsvRow row;
+        if (parse_perf_stat_csv_row(buffer, true, row)) {
+            if (row.scope == "S1") {
                 continue;
             }
+            double timestamp = row.timestamp;
+            long long value = normalize_perf_row_value(row, cache_line_size);
+            const std::string& event_name = row.event_name;
 
             if (last_timestamp >= 0 && timestamp != last_timestamp) {
+                long long effective_rd = 0;
+                long long effective_wr = 0;
+                apply_bandwidth_formula(selection, current_sample_rd, current_sample_wr, current_extra, effective_rd, effective_wr);
                 double duration = timestamp - last_timestamp;
                 if (duration < 0.000001) duration = interval / 1000.0;
 
@@ -142,11 +603,11 @@ bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_
                 if (using_combined) {
                     sample_valid = (current_sample_combined > 0);
                 } else {
-                    sample_valid = (current_sample_rd > 0 && current_sample_wr > 0);
+                    sample_valid = (effective_rd + effective_wr > 0);
                 }
                 if (sample_valid && total_samples_seen > warmup_samples) {
-                    sum_rd += current_sample_rd;
-                    sum_wr += current_sample_wr;
+                    sum_rd += effective_rd;
+                    sum_wr += effective_wr;
                     sum_combined += current_sample_combined;
                     for (const auto& kv : current_extra) {
                         sum_extra[kv.first] += kv.second;
@@ -184,12 +645,15 @@ bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_
         }
     }
 
+    long long effective_rd = 0;
+    long long effective_wr = 0;
+    apply_bandwidth_formula(selection, current_sample_rd, current_sample_wr, current_extra, effective_rd, effective_wr);
     bool sample_valid = using_combined 
         ? (current_sample_combined > 0) 
-        : (current_sample_rd > 0 && current_sample_wr > 0);
+        : (effective_rd + effective_wr > 0);
     if (samples_read < samples_to_read && sample_valid) {
-        sum_rd += current_sample_rd;
-        sum_wr += current_sample_wr;
+        sum_rd += effective_rd;
+        sum_wr += effective_wr;
         sum_combined += current_sample_combined;
         for (const auto& kv : current_extra) {
             sum_extra[kv.first] += kv.second;
@@ -197,6 +661,9 @@ bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_
         samples_read++;
     }
 
+    if (perf_stat_pid > 0) {
+        kill(perf_stat_pid, SIGTERM);
+    }
     pclose(pipe);
 
     bool success = false;
@@ -226,6 +693,7 @@ bool PerfBandwidthMeasurer::sample_with_popen(long long& cas_rd, long long& cas_
 
 bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long& last_cas_rd, long long& last_cas_wr, double& last_elapsed, int pause, int ratio, bool fast_resume, std::function<void()> on_sample) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    extra_perf_values_.clear();
     const bool verbose2 = config_.verbosity >= 2;
     const bool verbose3 = config_.verbosity >= 3;
     const bool verbose4 = config_.verbosity >= 4;
@@ -268,7 +736,7 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
 
     if (verbose3) {
         double full_peak = TheoreticalPeakCalculator::calculate_from_capabilities(caps_, is_remote);
-        std::cout << "    [Stabilizer] Theoretical peak: " << std::fixed << std::setprecision(1) 
+        std::cout << "      [Stabilizer] Theoretical peak: " << std::fixed << std::setprecision(1) 
                   << full_peak << " GB/s, Achievable (" << expected_cores << " cores): "
                   << theoretical_peak_gb_s << " GB/s, Noise floor: " 
                   << TheoreticalPeakCalculator::get_noise_floor(theoretical_peak_gb_s) << " GB/s" << '\n';
@@ -277,8 +745,11 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
     health_checker.is_pid_alive = [this](int pid) -> bool {
         return traffic_gen_manager_->is_traffic_gen_running(pid);
     };
-    health_checker.count_running_instances = []() -> int {
-        return TrafficGenHealthChecker::count_taskset_traffic_gen();
+    health_checker.count_running_instances = [this]() -> int {
+        if (!traffic_gen_manager_) {
+            return TrafficGenHealthChecker::count_taskset_traffic_gen();
+        }
+        return static_cast<int>(traffic_gen_manager_->traffic_gen_worker_pids().size());
     };
     health_checker.expected_instance_count = expected_cores;
 
@@ -307,12 +778,29 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                   << "BandwidthCounterStrategy must be initialized first." << std::endl;
         return false;
     }
-    std::string events_str = selection.get_bw_events_string();
+    std::string events_str = build_preferred_perf_events(selection);
+    const int perf_bind_cpu = get_perf_bind_cpu();
+    const bool attach_mode = use_pid_attach_mode(selection);
+    const std::string scope_args = build_perf_scope_args(selection, traffic_gen_manager_);
+    if (scope_args.empty()) {
+        if (attach_mode) {
+            std::cerr << "ERROR: No TrafficGen worker PIDs available for A64FX perf sampling." << std::endl;
+        }
+        return false;
+    }
 
-    std::string cmd = std::string("cd ") + storage_->bandwidth_dir() +
-                      " && stdbuf -oL -eL numactl -C 0 --membind=" + membind_arg +
-                      " perf stat -I " + std::to_string(interval) +
-                      " -a --per-socket -x, -e " + events_str + " 2>&1";
+    ensure_a64fx_pmu_available();
+
+    std::string cmd = std::string("cd ") + storage_->bandwidth_dir() + " && echo \"__PID__$$\" && exec stdbuf -oL -eL ";
+    if (!attach_mode) {
+        (void)perf_bind_cpu;
+        (void)membind_arg;
+        // For system-wide perf stat (-a/--per-socket), avoid numactl wrapping.
+        // Some Emerald Rapids/CXL setups can hang with:
+        //   numactl ... perf stat -a --per-socket ...
+    }
+    cmd += "perf stat -I " + std::to_string(interval) +
+           " -x, " + scope_args + " -e " + events_str + " 2>&1";
 
     FILE* pipe = popen(cmd.c_str(), "r");
     if (!pipe) {
@@ -324,6 +812,23 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
 
     setbuf(pipe, NULL);
     int pipe_fd = fileno(pipe);
+
+    pid_t perf_stat_pid = -1;
+    char pid_buf[256];
+    if (fgets(pid_buf, sizeof(pid_buf), pipe)) {
+        const char* marker = strstr(pid_buf, "__PID__");
+        if (marker) {
+            perf_stat_pid = static_cast<pid_t>(atol(marker + 7));
+        }
+    }
+
+    auto kill_and_pclose = [&]() {
+        if (perf_stat_pid > 0) {
+            kill(perf_stat_pid, SIGTERM);
+        }
+        pclose(pipe);
+        pipe = nullptr;
+    };
 
     BandwidthStabilizer stabilizer(
         theoretical_peak_gb_s, pause, health_checker,
@@ -337,6 +842,9 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
     bool success = false;
     
     long long sample_cas_rd = 0, sample_cas_wr = 0;
+    std::map<std::string, long long> sample_extra;
+    std::map<std::string, long long> aggregated_extra;
+    std::map<std::string, long long> final_extra;
     double last_timestamp = -1.0;
 
     long long final_cas_rd = 0, final_cas_wr = 0;
@@ -345,10 +853,22 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
     auto loop_start = std::chrono::steady_clock::now();
     const int READ_TIMEOUT_SECONDS = 10;
     int consecutive_timeouts = 0;
+    long long last_heartbeat_s = -1;
+    int parse_failures = 0;
 
     while (total_samples < max_samples) {
         auto elapsed_total = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::steady_clock::now() - loop_start).count();
+        if (verbose4 && (last_heartbeat_s < 0 || elapsed_total - last_heartbeat_s >= 5)) {
+            last_heartbeat_s = elapsed_total;
+            std::cout << "      [PERF DEBUG] heartbeat t=" << elapsed_total
+                      << "s, samples=" << total_samples
+                      << ", timeouts=" << consecutive_timeouts
+                      << ", perf_alive=" << (is_pid_alive(perf_stat_pid) ? "yes" : "no")
+                      << ", tg_alive="
+                      << (traffic_gen_manager_->is_traffic_gen_running(traffic_gen_manager_->active_traffic_gen_pid()) ? "yes" : "no")
+                      << '\n';
+        }
         
         if (elapsed_total > OVERALL_TIMEOUT_SECONDS) {
             std::cerr << "\n    ERROR: Perf stabilization timed out after " << OVERALL_TIMEOUT_SECONDS << " seconds." << '\n';
@@ -359,7 +879,7 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                           << "      - System overloaded\n"
                           << "    Command: " << cmd << '\n';
             }
-            pclose(pipe);
+            kill_and_pclose();
             traffic_gen_manager_->kill_all_traffic_gen();
             return false;
         }
@@ -376,7 +896,7 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
         
         if (ready < 0) {
             std::cerr << "    ERROR: select() failed on perf pipe" << '\n';
-            pclose(pipe);
+            kill_and_pclose();
             return false;
         }
         
@@ -396,7 +916,7 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                               << "      - perf stat command syntax error\n"
                               << "    Command: " << cmd << '\n';
                 }
-                pclose(pipe);
+                kill_and_pclose();
                 traffic_gen_manager_->kill_all_traffic_gen();
                 return false;
             }
@@ -406,30 +926,47 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
         consecutive_timeouts = 0;
         
         if (!fgets(buffer, sizeof(buffer), pipe)) {
+            if (verbose4) {
+                std::cout << "      [PERF DEBUG] fgets returned EOF/NULL from perf pipe" << '\n';
+            }
             break;
         }
         if (buffer[0] == '#' || strstr(buffer, "time") || strlen(buffer) < 5) {
+            if (verbose4) {
+                std::string line(buffer);
+                if (line.find("not supported") != std::string::npos ||
+                    line.find("No permission") != std::string::npos ||
+                    line.find("failed") != std::string::npos ||
+                    line.find("Error") != std::string::npos) {
+                    std::cout << "      [PERF DEBUG] diagnostic line: " << line;
+                }
+            }
             continue;
         }
 
-        double timestamp;
-        char socket[16];
-        int core_count;
-        long long value;
-        char event_name[256];
-
-        int parsed = sscanf(buffer, "%lf,%15[^,],%d,%lld,,%255[^,]", &timestamp, socket, &core_count, &value, event_name);
+        PerfCsvRow row;
+        const bool parsed = parse_perf_stat_csv_row(buffer, true, row);
         
         if (verbose4) {
             std::cout << "      [PERF RAW] parsed=" << parsed << " line: " << buffer;
         }
+        if (!parsed && verbose4 && parse_failures < 20) {
+            ++parse_failures;
+            std::cout << "      [PERF DEBUG] parse-fail[" << parse_failures << "]: " << buffer;
+        }
         
-        if (parsed == 5) {
-            if (strcmp(socket, "S1") == 0) {
+        if (parsed) {
+            if (row.scope == "S1") {
                 continue;
             }
+            double timestamp = row.timestamp;
+            long long value = normalize_perf_row_value(row, std::max(1, cached_cache_line_size_));
+            const std::string& event_name = row.event_name;
 
             if (last_timestamp >= 0 && timestamp != last_timestamp) {
+                long long effective_rd = 0;
+                long long effective_wr = 0;
+                apply_bandwidth_formula(selection, sample_cas_rd, sample_cas_wr, sample_extra, effective_rd, effective_wr);
                 double duration = timestamp - last_timestamp;
                 double target_duration = sampling_interval_ms_ / 1000.0;
                 double normalization_factor = 1.0;
@@ -438,11 +975,11 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                     normalization_factor = target_duration / duration;
                 }
 
-                if (sample_cas_rd + sample_cas_wr > 0) {
-                    long long norm_rd = static_cast<long long>(sample_cas_rd * normalization_factor);
-                    long long norm_wr = static_cast<long long>(sample_cas_wr * normalization_factor);
+                if (effective_rd + effective_wr > 0) {
+                    long long norm_rd = static_cast<long long>(effective_rd * normalization_factor);
+                    long long norm_wr = static_cast<long long>(effective_wr * normalization_factor);
                     long long total_cas = norm_rd + norm_wr;
-                    long long total_cas_reg = sample_cas_rd + sample_cas_wr;
+                    long long total_cas_reg = effective_rd + effective_wr;
                     
                     total_samples++;
 
@@ -462,11 +999,11 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
                                 continue;
                             } else {
-                                pclose(pipe);
+                                kill_and_pclose();
                                 return false;
                             }
                         } else {
-                            pclose(pipe);
+                            kill_and_pclose();
                             return false;
                         }
                     }
@@ -476,7 +1013,7 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                             std::cout << "\n    ⚠ WARNING: BW did not stabilize after " << OVERALL_TIMEOUT_SECONDS << "s" << '\n';
                             std::cout << "    Killing TrafficGen and triggering retry..." << '\n';
                         }
-                        pclose(pipe);
+                        kill_and_pclose();
                         traffic_gen_manager_->kill_all_traffic_gen();
                         std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
@@ -487,6 +1024,10 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                     final_cas_rd = norm_rd;
                     final_cas_wr = norm_wr;
                     final_elapsed = target_duration;
+                    final_extra = sample_extra;
+                    for (const auto& kv : sample_extra) {
+                        aggregated_extra[kv.first] += kv.second;
+                    }
 
                     double bw_gb_s = calculate_bw_gb_s(norm_rd, norm_wr, target_duration);
                     StabilizationResult result = stabilizer.add_sample(norm_rd, norm_wr, bw_gb_s);
@@ -495,7 +1036,7 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                         if (verbose2) {
                             std::cout << "    [ZOMBIE] TrafficGen died, aborting stabilization" << '\n';
                         }
-                        pclose(pipe);
+                        kill_and_pclose();
                         samples_taken = total_samples;
                         return false;
                     }
@@ -511,13 +1052,14 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                             }
                         } else {
                             if (total_cas_reg > 0) {
-                                read_ratio = static_cast<double>(sample_cas_rd) / static_cast<double>(total_cas_reg);
+                                read_ratio = static_cast<double>(effective_rd) / static_cast<double>(total_cas_reg);
                             }
                         }
                         
                         std::string counter_label = "CAS";
                         if (selection.type == CounterType::UPI_FLITS) counter_label = "UPI";
                         else if (selection.type == CounterType::NVIDIA_GRACE) counter_label = "GRACE";
+                        else if (selection.cas.uses_read_subtract_formula) counter_label = "A64FX";
                         
                         bool has_distinct_rw = selection.cas.has_read_write;
                         std::cout << "      [Sample " << total_samples << "] " << counter_label << ": " << total_cas;
@@ -534,7 +1076,7 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                             if (config_.verbosity >= 2) {
                                 std::cout << "    [ZOMBIE] Zero CAS + unhealthy traffic gen detected" << '\n';
                             }
-                            pclose(pipe);
+                            kill_and_pclose();
                             samples_taken = total_samples;
                             return false;
                         }
@@ -542,6 +1084,7 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                 }
                 sample_cas_rd = 0;
                 sample_cas_wr = 0;
+                EventClassification::reset_extra_values(sample_extra);
             }
 
             EventClassification ec = EventClassification::classify(event_name, selection);
@@ -552,7 +1095,9 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
                           << " val:" << value << '\n';
             }
 
-            if (ec.is_combined || ec.is_read) {
+            if (ec.is_extra) {
+                EventClassification::accumulate_extra(sample_extra, ec.extra_key, value);
+            } else if (ec.is_combined || ec.is_read) {
                 sample_cas_rd += value;
             } else if (ec.is_write) {
                 sample_cas_wr += value;
@@ -562,7 +1107,7 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
         }
     }
 
-    pclose(pipe);
+    kill_and_pclose();
 
     if (success) {
         long long aggregate_cas_rd = 0;
@@ -580,6 +1125,7 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
              std::cout << "      [BW AGGREGATE] Using " << samples.size()
                        << " stable samples (" << last_elapsed << "s total)" << '\n';
         }
+        extra_perf_values_ = aggregated_extra;
         
         samples_taken = total_samples;
         return true;
@@ -587,6 +1133,7 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
         last_cas_rd = final_cas_rd;
         last_cas_wr = final_cas_wr;
         last_elapsed = final_elapsed;
+        extra_perf_values_ = final_extra;
         samples_taken = total_samples;
         return false;
     }
@@ -595,6 +1142,7 @@ bool PerfBandwidthMeasurer::wait_for_stabilization(int& samples_taken, long long
 bool PerfBandwidthMeasurer::monitor_command(const std::string& command, 
                                             MonitorCallback callback,
                                             bool summary_mode) {
+    extra_perf_values_.clear();
     
     std::vector<int> mem_nodes = numa_resolver_ ? numa_resolver_() : std::vector<int>{0};
 
@@ -605,7 +1153,7 @@ bool PerfBandwidthMeasurer::monitor_command(const std::string& command,
         return false;
     }
 
-    std::string events_str = selection.get_all_events_string();
+    std::string events_str = build_preferred_perf_events(selection);
 
     std::string trimmed_command = command;
     const auto first_non_ws = trimmed_command.find_first_not_of(" \t\r\n");
@@ -625,7 +1173,10 @@ bool PerfBandwidthMeasurer::monitor_command(const std::string& command,
     std::stringstream perf_cmd;
     perf_cmd << "perf stat -x, ";
     if (!pid_attach_mode) {
-        perf_cmd << "-a --per-socket ";
+        perf_cmd << "-a ";
+        if (use_per_socket_aggregation(selection)) {
+            perf_cmd << "--per-socket ";
+        }
     }
     
     if (!summary_mode) {
@@ -636,6 +1187,8 @@ bool PerfBandwidthMeasurer::monitor_command(const std::string& command,
     perf_cmd << "-e " << events_str << " ";
     perf_cmd << trimmed_command;
     perf_cmd << " 2>&1";
+
+    ensure_a64fx_pmu_available();
 
     auto start_time = std::chrono::steady_clock::now();
     FILE* pipe = popen(perf_cmd.str().c_str(), "r");
@@ -655,10 +1208,13 @@ bool PerfBandwidthMeasurer::monitor_command(const std::string& command,
     ensure_scaling_factor_cached();
 
     auto process_aggregation = [&](double timestamp, double duration_s) {
-        double bw = calculate_bandwidth_gbps(current_rd, current_wr, duration_s,
+        long long effective_rd = 0;
+        long long effective_wr = 0;
+        apply_bandwidth_formula(selection, current_rd, current_wr, current_extra, effective_rd, effective_wr);
+        double bw = calculate_bandwidth_gbps(effective_rd, effective_wr, duration_s,
                                              selection.type, cached_cache_line_size_, cached_scaling_factor_);
         if (callback) {
-            callback(timestamp, bw, current_rd, current_wr, current_extra);
+            callback(timestamp, bw, effective_rd, effective_wr, current_extra);
         }
     };
 
@@ -667,30 +1223,27 @@ bool PerfBandwidthMeasurer::monitor_command(const std::string& command,
             continue;
         }
 
-        float timestamp = 0.0f;
-        char socket[16] = "";
-        int core_count = 0;
-        long long value = 0;
-        char event_name[256] = "";
+        PerfCsvRow row;
 
         if (!summary_mode) {
-            if (sscanf(buffer, "%f,%15[^,],%d,%lld,,%255[^,]", &timestamp, socket, &core_count, &value, event_name) != 5) {
+            if (!parse_perf_stat_csv_row(buffer, true, row)) {
                 continue;
             }
-            if (strcmp(socket, "S1") == 0) {
+            if (row.scope == "S1") {
                 continue;
             }
         } else {
-            if (sscanf(buffer, "%15[^,],%d,%lld,,%255[^,]", socket, &core_count, &value, event_name) != 4) {
+            if (!parse_perf_stat_csv_row(buffer, false, row)) {
                 continue;
             }
-            if (strcmp(socket, "S1") == 0) {
+            if (row.scope == "S1") {
                 continue;
             }
-            timestamp = 0.0f;
+            row.timestamp = 0.0;
         }
 
         if (!summary_mode) {
+            float timestamp = static_cast<float>(row.timestamp);
             if (std::abs(static_cast<double>(timestamp) - current_timestamp) > 0.0001) {
                 if (has_data) {
                     double duration = sampling_interval_ms_ / 1000.0;
@@ -706,15 +1259,16 @@ bool PerfBandwidthMeasurer::monitor_command(const std::string& command,
             has_data = true;
         }
 
-        EventClassification ec = EventClassification::classify(event_name, selection);
+        EventClassification ec = EventClassification::classify(row.event_name, selection);
+        const long long row_value = normalize_perf_row_value(row, std::max(1, cached_cache_line_size_));
 
         if (ec.is_extra) {
-            EventClassification::accumulate_extra(current_extra, ec.extra_key, value);
-            EventClassification::accumulate_extra(total_extra, ec.extra_key, value);
+            EventClassification::accumulate_extra(current_extra, ec.extra_key, row_value);
+            EventClassification::accumulate_extra(total_extra, ec.extra_key, row_value);
         } else if (ec.is_read || ec.is_combined) {
-            current_rd += value;
+            current_rd += row_value;
         } else if (ec.is_write) {
-            current_wr += value;
+            current_wr += row_value;
         }
     }
 

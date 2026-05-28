@@ -36,12 +36,13 @@
 #include <iostream>
 
 CasCounterSelection X86Counters::detectCasCounters() {
-    return discoverFromPerf();
+    return discoverCasCountersForRequestedMeasurer();
 }
 
 void X86Counters::getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) {
-    tlb1_raw = 0x2012;
-    tlb2_raw = 0x1012;
+    // Intel fallback (SPR-family encoding); see per-uarch counter classes for refs.
+    tlb1_raw = 0x1012;  // DTLB_LOAD_MISSES.WALK_PENDING
+    tlb2_raw = 0x2012;  // DTLB_LOAD_MISSES.STLB_HIT
     use_tlb1 = true;
     use_tlb2 = true;
 }

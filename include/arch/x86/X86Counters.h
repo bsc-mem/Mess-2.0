@@ -36,9 +36,37 @@
 
 #include "architecture/BandwidthCounterStrategy.h"
 
+/**
+ * @file X86Counters.h
+ * @brief Generic x86 counter strategy.
+ */
+
+/** @brief Counter discovery strategy for generic x86 systems. */
 class X86Counters : public BandwidthCounterStrategy {
 public:
+    /**
+     * @brief Detects and returns the appropriate CAS counters for x86.
+     * 
+     * The term "CAS" is kept for historical continuity. On x86 architectures, this function 
+     * determines the required uncore performance monitoring events (such as Intel IMC or AMD UMC) 
+     * to accurately track read and write bandwidth to main memory.
+     * 
+     * @return CasCounterSelection The selected counters and their configuration.
+     */
     CasCounterSelection detectCasCounters() override;
+
+    /**
+     * @brief Retrieves the raw event codes for x86 TLB miss counters.
+     * 
+     * This function provides the hardware-specific event codes needed to monitor
+     * Data TLB misses on x86, which is crucial for analyzing the performance penalty 
+     * of page walks during memory-intensive operations.
+     * 
+     * @param tlb1_raw Reference to store the first TLB miss counter event code.
+     * @param tlb2_raw Reference to store the second TLB miss counter event code.
+     * @param use_tlb1 Reference to a boolean indicating if the first counter should be used.
+     * @param use_tlb2 Reference to a boolean indicating if the second counter should be used.
+     */
     void getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) override;
 };
 

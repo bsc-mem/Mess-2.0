@@ -34,12 +34,14 @@
 #include "arch/arm/counters/Graviton3Counters.h"
 
 CasCounterSelection Graviton3Counters::detectCasCounters() {
-    return discoverFromPerf();
+    return discoverCasCountersForRequestedMeasurer();
 }
 
 void Graviton3Counters::getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) {
-    tlb1_raw = 0x0005;
-    tlb2_raw = 0x002D;
+    // Graviton3 = Neoverse V1; ARMv8 architectural events:
+    //   https://developer.arm.com/documentation/PJDOC-466751330-593177/latest
+    tlb1_raw = 0x34;    // DTLB_WALK: "Access to data TLB causes a translation table walk"
+    tlb2_raw = 0x4c;    // L1D_TLB_REFILL_RD: "Attributable L1 data TLB refill, read"
     use_tlb1 = true;
     use_tlb2 = true;
 }

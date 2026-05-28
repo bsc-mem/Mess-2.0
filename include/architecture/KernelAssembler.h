@@ -35,8 +35,16 @@
 #define KERNEL_ASSEMBLER_H
 
 #include <string>
-#include "kernel_types.h"
+#include "KernelTypes.h"
 
+/**
+ * @file KernelAssembler.h
+ * @brief Abstract assembly emitter used by traffic-generator code generation.
+ */
+
+/**
+ * @brief Emits architecture-specific assembly fragments for generated kernels.
+ */
 class KernelAssembler {
 public:
     virtual ~KernelAssembler() = default;

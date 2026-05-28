@@ -1,5 +1,40 @@
 # Changelog
 
+## [2.0.3] - 28-05-2026
+_May 28th 2026_
+
+### Added
+
+- **New Bandwidth Measurers**:
+  - **Intel PCM**: Added Intel PCM as a bandwidth measurement backend with CXL compatibility
+  - **Expanded LIKWID**: Counter aggregation across multiple CPUs, automatic HBM sub-channel detection (SCHX), extra MBOX events, and full add-counters support
+  - **Intel VTune**: Added as an alternative bandwidth measurement backend
+- **Instruction Sampling**: New optional instruction sampling infrastructure for fine-grained execution analysis
+- **Adaptive Curve-Guided Pause Discovery**: Automatically derives optimal pause timings from the bandwidth curve.
+
+### Improved
+
+- **Platform Support**:
+  - **Expanded ISA Support**: Added support for additional ISAs within existing architectures
+  - **ARM Systems**: Bandwidth and latency measurements are now significantly more reliable
+  - **SubNUMA / HBM Latency**: Improved latency measurements on SubNUMA and HBM systems
+  - **CXL Compatibility**: Full support for CXL-attached memory via Intel PCM backend
+- **Measurement Stability**:
+  - **Bandwidth Stabilization**: Improved warmup handling with automatic bypass for low-throughput scenarios; more robust windowing and steady-state detection
+  - **Performance Counters**: Extra counters now measured in the same command as bandwidth counters (reduced overhead); fixed counter value reporting for perf add-counters
+- **Topology & Binding**:
+  - **Topology Detection**: Enhanced NUMA and CPU topology discovery for more accurate system characterization
+  - **Memory Binding**: Improved CPU and memory binding logic with better inheritance from `numactl`/`taskset`
+- **Assembly Generation**:
+  - New `AddressingPolicy` for flexible memory addressing modes
+  - New `StoreLinePolicy` for configurable store line management
+- **Curve Processing**: Smoother bandwidth/latency curve output with improved correction and visualization formatting
+- **CLI**: Better argument validation, clearer error messages, and improved diagnostics
+
+### Fixed
+- **Various Minor bugs**
+
+
 ## [2.0.2] - 09-02-2026
 _February 9th 2026_
 

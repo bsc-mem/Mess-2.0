@@ -37,6 +37,12 @@
 #include "architecture/Architecture.h"
 #include "architecture/ISA.h"
 
+/**
+ * @file X86Architecture.h
+ * @brief x86 architecture plugin.
+ */
+
+/** @brief Architecture plugin for x86 systems. */
 class X86Architecture : public Architecture {
 public:
     std::string getName() const override { return "x86"; }

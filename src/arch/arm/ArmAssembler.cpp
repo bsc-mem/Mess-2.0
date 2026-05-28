@@ -32,31 +32,350 @@
  */
 
 #include "arch/arm/ArmAssembler.h"
+#include <algorithm>
 #include <iomanip>
+#include <set>
 
-std::string ArmAssembler::generateLoad(int /*offset*/, int reg) const {
+namespace {
+
+bool isSVEFamily(ISAMode mode) {
+    return mode == ISAMode::SVE ||
+           mode == ISAMode::SVE_MAX ||
+           mode == ISAMode::SVE128 ||
+           mode == ISAMode::SVE256 ||
+           mode == ISAMode::SVE512;
+}
+
+bool isNeonPairMode(ISAMode mode) {
+    return mode == ISAMode::NEON_PAIR;
+}
+
+int requestedSVEBits(ISAMode mode) {
+    switch (mode) {
+        case ISAMode::SVE128: return 128;
+        case ISAMode::SVE256: return 256;
+        case ISAMode::SVE512: return 512;
+        default: return 0;
+    }
+}
+
+AddressingPolicy resolveAddressingPolicy(const KernelConfig& config) {
+    if (config.addressing_policy == AddressingPolicy::AUTO) {
+        return AddressingPolicy::POST_INCREMENT;
+    }
+    return config.addressing_policy;
+}
+
+std::string emitAddressAdd(const char* base, int offset) {
     std::ostringstream oss;
-    if (config_.isa_mode == ISAMode::SVE) {
-        oss << "        \"ld1d {z" << reg << ".d}, p0/z, [x19];\\n\"\n"
-            << "        \"add x19, x19, #64;\\n\"\n";
+    if (offset == 0) {
+        oss << "        \"mov x8, " << base << ";\\n\"\n";
+    } else if (offset > 0 && offset < 4096) {
+        oss << "        \"add x8, " << base << ", #" << offset << ";\\n\"\n";
     } else {
-        int r1 = (2 * reg) % 32;
-        int r2 = (2 * reg + 1) % 32;
-        oss << "        \"LDP Q" << r1 << ", Q" << r2 << ", [x19], #128;\\n\"\n";
+        oss << "        \"movz x9, #0x" << std::hex << (offset & 0xFFFF) << ";\\n\"\n";
+        if (offset > 0xFFFF) {
+            oss << "        \"movk x9, #0x" << std::hex << ((offset >> 16) & 0xFFFF) << ", LSL #16;\\n\"\n";
+        }
+        oss << "        \"add x8, " << base << ", x9;\\n\"\n";
     }
     return oss.str();
 }
 
-std::string ArmAssembler::generateStore(int /*offset*/, int reg) const {
+int resolvedArmBytesPerMemOp(const KernelConfig& config) {
+    if (config.resolved_bytes_per_mem_op > 0) {
+        return config.resolved_bytes_per_mem_op;
+    }
+    if (isSVEFamily(config.isa_mode)) {
+        return 64;
+    }
+    return isNeonPairMode(config.isa_mode) ? 32 : 16;
+}
+
+
+int nextArmLabelId() {
+    static int next_id = 0;
+    return ++next_id;
+}
+
+std::string emitSveSequentialDynamicStoreBurst(int reg, const char* op) {
     std::ostringstream oss;
-    if (config_.isa_mode == ISAMode::SVE) {
-        std::string op = config_.use_nontemporal_stores ? "stnt1d" : "st1d";
-        oss << "        \"" << op << " {z" << reg << ".d}, p0, [x20];\\n\"\n"
-            << "        \"add x20, x20, #64;\\n\"\n";
+    const int label_id = nextArmLabelId();
+    const std::string done = ".L_mess_sve_seq_store_done_" + std::to_string(label_id);
+    oss << "        \"" << op << " {z" << reg << ".d}, p0, [x20];\\n\"\n"
+        << "        \"addvl x20, x20, #1;\\n\"\n";
+    for (int burst = 1; burst < 8; ++burst) {
+        oss << "        \"cmp x26, #" << burst << ";\\n\"\n"
+            << "        \"b.le " << done << ";\\n\"\n"
+            << "        \"" << op << " {z" << reg << ".d}, p0, [x20];\\n\"\n"
+            << "        \"addvl x20, x20, #1;\\n\"\n";
+    }
+    oss << "        \"" << done << ":\\n\"\n";
+    return oss.str();
+}
+
+
+std::string emitArmVlConfigurationHelpers() {
+    return R"ARM(#include <stdlib.h>
+#include <stdio.h>
+#if defined(__GNUC__)
+#define MESS_MAYBE_UNUSED __attribute__((unused))
+#else
+#define MESS_MAYBE_UNUSED
+#endif
+#if defined(__linux__) && defined(__aarch64__)
+#include <sys/prctl.h>
+#include <linux/prctl.h>
+#include <asm/sigcontext.h>
+#if defined(__ARM_FEATURE_SVE)
+#include <arm_sve.h>
+#endif
+static MESS_MAYBE_UNUSED int mess_arm_instruction_sve_vl_bytes(void)
+{
+#if defined(__ARM_FEATURE_SVE)
+    return (int)svcntb();
+#else
+    return -1;
+#endif
+}
+static MESS_MAYBE_UNUSED int mess_arm_current_sve_vl_bytes(void)
+{
+#if defined(PR_SVE_GET_VL) && defined(PR_SVE_VL_LEN_MASK)
+    long current = prctl(PR_SVE_GET_VL);
+    if (current < 0) {
+        perror("prctl(PR_SVE_GET_VL)");
+        abort();
+    }
+    int active_bytes = (int)(current & PR_SVE_VL_LEN_MASK);
+    int instruction_bytes = mess_arm_instruction_sve_vl_bytes();
+    if (instruction_bytes > 0 && instruction_bytes != active_bytes) {
+        fprintf(stderr,
+                "SVE VL validation mismatch: PR_SVE_GET_VL reports %d bits but instructions report %d bits\n",
+                active_bytes * 8, instruction_bytes * 8);
+        abort();
+    }
+    return active_bytes;
+#else
+    return 0;
+#endif
+}
+static MESS_MAYBE_UNUSED int mess_arm_configure_sve_vl_bytes(int requested_bits, int require_exact)
+{
+#if defined(PR_SVE_SET_VL) && defined(PR_SVE_VL_LEN_MASK) && (defined(PR_SVE_VL_MAX) || defined(SVE_VL_MAX))
+#if defined(PR_SVE_VL_MAX)
+    const unsigned long mess_sve_max_vl = (unsigned long)PR_SVE_VL_MAX;
+#else
+    const unsigned long mess_sve_max_vl = (unsigned long)SVE_VL_MAX;
+#endif
+    unsigned long requested = (requested_bits > 0) ? (unsigned long)(requested_bits / 8) : mess_sve_max_vl;
+    long configured = prctl(PR_SVE_SET_VL, requested);
+    if (configured < 0) {
+        perror("prctl(PR_SVE_SET_VL)");
+        abort();
+    }
+    long current = prctl(PR_SVE_GET_VL);
+    if (current < 0) {
+        perror("prctl(PR_SVE_GET_VL)");
+        abort();
+    }
+    int active_bytes = (int)(current & PR_SVE_VL_LEN_MASK);
+    if (active_bytes <= 0) {
+        active_bytes = (int)(configured & PR_SVE_VL_LEN_MASK);
+    }
+    if (active_bytes <= 0) {
+        fprintf(stderr, "Failed to resolve active SVE VL after PR_SVE_SET_VL\n");
+        abort();
+    }
+    int instruction_bytes = mess_arm_instruction_sve_vl_bytes();
+    if (instruction_bytes > 0 && instruction_bytes != active_bytes) {
+        fprintf(stderr,
+                "SVE VL validation mismatch after PR_SVE_SET_VL: PR_SVE_GET_VL reports %d bits but instructions report %d bits\n",
+                active_bytes * 8, instruction_bytes * 8);
+        abort();
+    }
+    if (require_exact && requested_bits > 0 && active_bytes != (requested_bits / 8)) {
+        fprintf(stderr, "Requested SVE VL %d bits but kernel configured %d bits\n",
+                requested_bits, active_bytes * 8);
+        abort();
+    }
+    return active_bytes;
+#else
+    (void)requested_bits;
+    (void)require_exact;
+    return 0;
+#endif
+}
+#else
+static MESS_MAYBE_UNUSED int mess_arm_instruction_sve_vl_bytes(void)
+{
+    return -1;
+}
+static MESS_MAYBE_UNUSED int mess_arm_current_sve_vl_bytes(void)
+{
+    return 0;
+}
+static MESS_MAYBE_UNUSED int mess_arm_configure_sve_vl_bytes(int requested_bits, int require_exact)
+{
+    (void)requested_bits;
+    (void)require_exact;
+    return 0;
+}
+#endif
+
+static MESS_MAYBE_UNUSED int mess_arm_store_burst_count(int bytes_per_op, int target_line_bytes)
+{
+    if (target_line_bytes <= 0 || bytes_per_op <= 0 || bytes_per_op >= target_line_bytes) {
+        return 1;
+    }
+    return target_line_bytes / bytes_per_op;
+}
+
+)ARM";
+}
+
+std::string emitMovImmediate(const char* reg, int value) {
+    std::ostringstream oss;
+    oss << "        \"movz " << reg << ", #0x" << std::hex << (value & 0xFFFF) << ";\\n\"\n";
+    if (value > 0xFFFF) {
+        oss << "        \"movk " << reg << ", #0x" << std::hex << ((value >> 16) & 0xFFFF) << ", LSL #16;\\n\"\n";
+    }
+    return oss.str();
+}
+
+std::string emitSveIndexedAddress(const char* base, int op_index) {
+    std::ostringstream oss;
+    if (op_index == 0) {
+        oss << "        \"mov x15, x21;\\n\"\n";
     } else {
-        int r1 = (2 * reg) % 32;
-        int r2 = (2 * reg + 1) % 32;
-        oss << "        \"STP Q" << r1 << ", Q" << r2 << ", [x20], #128;\\n\"\n";
+        oss << emitMovImmediate("x9", op_index);
+        oss << "        \"madd x15, x9, x28, x21;\\n\"\n";
+    }
+    oss << "        \"lsl x15, x15, #3;\\n\"\n"
+        << "        \"add x8, " << base << ", x15;\\n\"\n";
+    return oss.str();
+}
+
+std::string emitSveSequentialDynamicStoreBurstIndexed(int reg, const char* op, int op_index) {
+    std::ostringstream oss;
+    const int label_id = nextArmLabelId();
+    const std::string done = ".L_mess_sve_seq_store_idx_done_" + std::to_string(label_id);
+    oss << emitSveIndexedAddress("x20", op_index);
+    oss << "        \"" << op << " {z" << reg << ".d}, p0, [x8];\\n\"\n";
+    for (int burst = 1; burst < 8; ++burst) {
+        oss << "        \"cmp x26, #" << burst << ";\\n\"\n"
+            << "        \"b.le " << done << ";\\n\"\n"
+            << "        \"add x8, x8, x28, lsl #3;\\n\"\n"
+            << "        \"" << op << " {z" << reg << ".d}, p0, [x8];\\n\"\n";
+    }
+    oss << "        \"" << done << ":\\n\"\n";
+    return oss.str();
+}
+
+int maxArmVectorRegistersForMode(ISAMode mode) {
+    return isNeonPairMode(mode) ? 16 : 32;
+}
+
+int usedArmVectorRegisters(const KernelConfig& config) {
+    if (config.single_registers) {
+        return 1;
+    }
+    return std::max(1, std::min(config.num_simd_registers, maxArmVectorRegistersForMode(config.isa_mode)));
+}
+
+
+std::string armSequentialVectorClobbers(const KernelConfig& config) {
+    std::ostringstream oss;
+    const int used_regs = usedArmVectorRegisters(config);
+    if (isSVEFamily(config.isa_mode)) {
+        for (int reg = 0; reg < used_regs; ++reg) {
+            oss << ", \"z" << reg << "\"";
+        }
+        oss << ", \"p0\"";
+        return oss.str();
+    }
+
+    for (int reg = 0; reg < used_regs; ++reg) {
+        if (isNeonPairMode(config.isa_mode)) {
+            const int qreg = (reg * 2) % 32;
+            oss << ", \"q" << qreg << "\", \"q" << (qreg + 1) << "\"";
+        } else {
+            oss << ", \"q" << reg << "\"";
+        }
+    }
+    return oss.str();
+}
+
+}
+
+std::string ArmAssembler::generateLoad(int offset, int reg) const {
+    std::ostringstream oss;
+    AddressingPolicy policy = resolveAddressingPolicy(config_);
+
+    if (isSVEFamily(config_.isa_mode)) {
+        if (policy == AddressingPolicy::POST_INCREMENT) {
+            oss << "        \"ld1d {z" << reg << ".d}, p0/z, [x19];\\n\"\n"
+                << "        \"addvl x19, x19, #1;\\n\"\n";
+        } else {
+            const int op_index = offset / std::max(1, resolvedArmBytesPerMemOp(config_));
+            oss << emitSveIndexedAddress("x19", op_index)
+                << "        \"ld1d {z" << reg << ".d}, p0/z, [x8];\\n\"\n";
+        }
+    } else {
+        const bool pair_mode = isNeonPairMode(config_.isa_mode);
+        int qreg = pair_mode ? ((reg * 2) % 32) : (reg % 32);
+        if (policy == AddressingPolicy::POST_INCREMENT) {
+            int step = resolvedArmBytesPerMemOp(config_);
+            if (pair_mode) {
+                oss << "        \"ldp q" << qreg << ", q" << (qreg + 1) << ", [x19], #" << step << ";\\n\"\n";
+            } else {
+                oss << "        \"ldr q" << qreg << ", [x19], #" << step << ";\\n\"\n";
+            }
+        } else {
+            oss << "        \"lsl x15, x21, #3;\\n\"\n";
+            oss << emitAddressAdd("x19", offset);
+            oss << "        \"add x8, x8, x15;\\n\"\n";
+            if (pair_mode) {
+                oss << "        \"ldp q" << qreg << ", q" << (qreg + 1) << ", [x8];\\n\"\n";
+            } else {
+                oss << "        \"ldr q" << qreg << ", [x8];\\n\"\n";
+            }
+        }
+    }
+    return oss.str();
+}
+
+std::string ArmAssembler::generateStore(int offset, int reg) const {
+    std::ostringstream oss;
+    AddressingPolicy policy = resolveAddressingPolicy(config_);
+
+    if (isSVEFamily(config_.isa_mode)) {
+        std::string op = config_.use_nontemporal_stores ? "stnt1d" : "st1d";
+        if (policy == AddressingPolicy::POST_INCREMENT) {
+            oss << emitSveSequentialDynamicStoreBurst(reg, op.c_str());
+        } else {
+            const int op_index = offset / std::max(1, resolvedArmBytesPerMemOp(config_));
+            oss << emitSveSequentialDynamicStoreBurstIndexed(reg, op.c_str(), op_index);
+        }
+    } else {
+        const bool pair_mode = isNeonPairMode(config_.isa_mode);
+        int qreg = pair_mode ? ((reg * 2) % 32) : (reg % 32);
+        if (policy == AddressingPolicy::POST_INCREMENT) {
+            int step = resolvedArmBytesPerMemOp(config_);
+            if (pair_mode) {
+                oss << "        \"stp q" << qreg << ", q" << (qreg + 1) << ", [x20], #" << step << ";\\n\"\n";
+            } else {
+                oss << "        \"str q" << qreg << ", [x20], #" << step << ";\\n\"\n";
+            }
+        } else {
+            oss << "        \"lsl x15, x21, #3;\\n\"\n";
+            oss << emitAddressAdd("x20", offset);
+            oss << "        \"add x8, x8, x15;\\n\"\n";
+            if (pair_mode) {
+                oss << "        \"stp q" << qreg << ", q" << (qreg + 1) << ", [x8];\\n\"\n";
+            } else {
+                oss << "        \"str q" << qreg << ", [x8];\\n\"\n";
+            }
+        }
     }
     return oss.str();
 }
@@ -76,9 +395,14 @@ std::string ArmAssembler::generateLoopControl(int increment, int labelId) const 
         return ss.str();
     };
 
-    int loopIncrement = increment;
-    oss << "\n"
-        << safe_add("x21", loopIncrement);
+    oss << "\n";
+    if (isSVEFamily(config_.isa_mode)) {
+        oss << "        \"add x21, x21, x27;\\n\"\n";
+    } else {
+        // Kernel generator passes increments in bytes. The outer loop counter x21 tracks elements.
+        int loopIncrement = increment / 8;
+        oss << safe_add("x21", loopIncrement);
+    }
 
     oss << "        \"cmp x21, x22;\\n\"\n";
     oss << "        \"blt ..L_" << labelId << ";\\n\"\n";
@@ -86,9 +410,14 @@ std::string ArmAssembler::generateLoopControl(int increment, int labelId) const 
 }
 
 std::string ArmAssembler::generatePause() const {
-    return "        \"mov x11, x30;\\n\"\n"
-           "        \"bl  nop_;\\n\"\n"
-           "        \"mov x30, x11;\\n\"\n";
+    // Avoid call overhead when pause is zero; execute the delay inline only when needed.
+    return "        \"cbz x4, 2f;\\n\"\n"
+           "        \"mov x10, x4;\\n\"\n"
+           "        \"1:\\n\"\n"
+           "        \"nop;\\n\"\n"
+           "        \"subs x10, x10, #1;\\n\"\n"
+           "        \"b.ne 1b;\\n\"\n"
+           "        \"2:\\n\"\n";
 }
 
 std::string ArmAssembler::generateHeader() const {
@@ -99,6 +428,7 @@ std::string ArmAssembler::generateHeader() const {
         << " */\n\n"
         << "#include <stdio.h>\n"
         << "#include <unistd.h>\n"
+        << emitArmVlConfigurationHelpers()
         << "#include \"utils.h\"\n\n"
         << "void print_usage(char *argv[], char* usage)\n"
         << "{\n"
@@ -108,12 +438,29 @@ std::string ArmAssembler::generateHeader() const {
 }
 
 std::string ArmAssembler::generateRegisterSetup() const {
-    return "    register ssize_t i;\n"
-           "    i = 0;\n\n";
+    std::ostringstream oss;
+    if (isSVEFamily(config_.isa_mode)) {
+        oss << "    int mess_sve_bytes_per_op = 0;\n";
+        oss << "    int mess_sve_store_burst_count = 1;\n";
+        oss << "    ssize_t mess_sve_loop_increment_elements = 0;\n";
+        oss << "    ssize_t mess_sve_elements_per_op = 0;\n";
+        const int requested_bits = requestedSVEBits(config_.isa_mode);
+        if (config_.isa_mode == ISAMode::SVE) {
+            oss << "    mess_sve_bytes_per_op = mess_arm_current_sve_vl_bytes();\n";
+        } else if (config_.isa_mode == ISAMode::SVE_MAX || requested_bits > 0) {
+            const int require_exact = requested_bits > 0 ? 1 : 0;
+            oss << "    mess_sve_bytes_per_op = mess_arm_configure_sve_vl_bytes("
+                << requested_bits << ", " << require_exact << ");\n"
+                << "    (void)mess_sve_bytes_per_op;\n";
+        }
+        oss << "    mess_sve_elements_per_op = (ssize_t)(mess_sve_bytes_per_op / 8);\n";
+    }
+    oss << "\n";
+    return oss.str();
 }
 
 std::string ArmAssembler::generateVectorRegisterInit() const {
-    if (config_.isa_mode == ISAMode::SVE) {
+    if (isSVEFamily(config_.isa_mode)) {
         return "      \"ptrue p0.d;\\n\"\n";
     }
     return "";
@@ -124,25 +471,43 @@ std::string ArmAssembler::generateFooter() const {
 }
 
 std::string ArmAssembler::generateAsmStart() const {
+    if (isSVEFamily(config_.isa_mode)) {
+        return "    asm __volatile__ (\n"
+               "      \"mov x21, #0x0;\\n\"\n"
+               "      \"mov x19, %0;\\n\"\n"
+               "      \"mov x20, %3;\\n\"\n"
+               "      \"mov x22, %1;\\n\"\n"
+               "      \"mov x4, %2;\\n\"\n"
+               "      \"mov x26, %4;\\n\"\n"
+               "      \"mov x27, %5;\\n\"\n"
+               "      \"mov x28, %6;\\n\"";
+    }
     return "    asm __volatile__ (\n"
            "      \"mov x21, #0x0;\\n\"\n"
            "      \"mov x19, %0;\\n\"\n"
-           "      \"mov x20, %4;\\n\"\n"
-           "      \"mov x22, %2;\\n\"\n"
-           "      \"mov x4, %3;\\n\"";
+           "      \"mov x20, %3;\\n\"\n"
+           "      \"mov x22, %1;\\n\"\n"
+           "      \"mov x4, %2;\\n\"";
 }
 
 std::string ArmAssembler::generateAsmEnd() const {
-    if (config_.isa_mode == ISAMode::SVE) {
-        return "      :\n"
-               "      : \"r\" (a_array), \"r\" (i), \"r\" (*array_size), \"r\" (*pause), \"r\" (b_array)\n"
-               "      : \"x0\", \"x1\", \"x2\", \"x3\", \"x4\", \"x5\", \"x6\", \"x7\", \"x8\", \"x9\", \"x10\", \"x11\", \"x12\", \"x13\", \"x14\", \"x15\", \"x16\", \"x17\", \"x18\", \"x19\", \"x20\", \"x21\", \"x22\", \"x30\", \"z0\", \"p0\", \"memory\", \"cc\"\n"
-               "    );\n";
+    std::ostringstream oss;
+    if (isSVEFamily(config_.isa_mode)) {
+        oss << "      :\n"
+            << "      : \"r\" (a_array), \"r\" (*array_size), \"r\" (*pause), \"r\" (b_array), \"r\" (mess_sve_store_burst_count), \"r\" (mess_sve_loop_increment_elements), \"r\" (mess_sve_elements_per_op)\n"
+            << "      : \"x4\", \"x8\", \"x9\", \"x10\", \"x15\", \"x19\", \"x20\", \"x21\", \"x22\", \"x26\", \"x27\", \"x28\""
+            << armSequentialVectorClobbers(config_)
+            << ", \"memory\", \"cc\"\n"
+            << "    );\n";
+    } else {
+        oss << "      :\n"
+            << "      : \"r\" (a_array), \"r\" (*array_size), \"r\" (*pause), \"r\" (b_array)\n"
+            << "      : \"x4\", \"x8\", \"x9\", \"x10\", \"x15\", \"x19\", \"x20\", \"x21\", \"x22\""
+            << armSequentialVectorClobbers(config_)
+            << ", \"memory\", \"cc\"\n"
+            << "    );\n";
     }
-    return "      :\n"
-           "      : \"r\" (a_array), \"r\" (i), \"r\" (*array_size), \"r\" (*pause), \"r\" (b_array)\n"
-           "      : \"x0\", \"x1\", \"x2\", \"x3\", \"x4\", \"x5\", \"x6\", \"x7\", \"x8\", \"x9\", \"x10\", \"x11\", \"x12\", \"x13\", \"x14\", \"x15\", \"x16\", \"x17\", \"x18\", \"x19\", \"x20\", \"x21\", \"x22\", \"x30\", \"q0\", \"q1\", \"memory\", \"cc\"\n"
-           "    );\n";
+    return oss.str();
 }
 
 std::string ArmAssembler::getPointerChaseLoopAsm() const {
@@ -183,16 +548,16 @@ void volatile nop_(void) {
 
     asm __volatile__ (
       "cmp x4, #0x0;\n"
-      "bne start_pause;\n"
-      "b end;\n"
-      "start_pause:"
+      "bne 1f;\n"
+      "b 3f;\n"
+      "1:\n"
       "mov x10, x4;\n"
-      "start_loop:\n"
+      "2:\n"
       "nop;\n"
       "subs x10, x10, #0x01;\n"
       "cmp x10, #0x0;\n"
-      "bne start_loop;\n"
-      "end:"
+      "bne 2b;\n"
+      "3:\n"
       :
       :
       : "x30", "x4", "x10"

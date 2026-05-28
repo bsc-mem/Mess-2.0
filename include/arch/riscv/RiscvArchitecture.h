@@ -37,6 +37,12 @@
 #include "architecture/Architecture.h"
 #include "architecture/ISA.h"
 
+/**
+ * @file RiscvArchitecture.h
+ * @brief RISC-V architecture plugin.
+ */
+
+/** @brief Architecture plugin for RISC-V systems. */
 class RiscvArchitecture : public Architecture {
 public:
     std::string getName() const override { return "riscv"; }

@@ -38,6 +38,12 @@
 #include "architecture/ISA.h"
 #include <sstream>
 
+/**
+ * @file ArmAssembler.h
+ * @brief ARM assembly emitter for generated traffic kernels.
+ */
+
+/** @brief Emits ARM-specific assembly fragments for generated kernels. */
 class ArmAssembler : public KernelAssembler {
     KernelConfig config_;
 public:

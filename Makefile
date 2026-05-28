@@ -35,65 +35,117 @@ CC = gcc
 
 JOBS ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
 
-OPTFLAGS = -O3 -march=native
+ARCH := $(shell uname -m)
+
+ifeq ($(ARCH),riscv64)
+    OPTFLAGS = -O3 -march=rv64g
+else
+    OPTFLAGS = -O3 -march=native
+endif
+
 OPTFLAGS += -funroll-loops -ffast-math -fomit-frame-pointer
 OPTFLAGS += -finline-functions
 
-CXXFLAGS = -std=c++17 -Wall -Wextra $(OPTFLAGS) -pthread -I. -I./include -I./src -I./src/libraries -I./include/arch
+GCC_VERSION := $(shell $(CXX) -dumpversion | cut -d. -f1)
+GCC_MINOR := $(shell $(CXX) -dumpversion | cut -d. -f2)
+
+ifeq ($(shell [ $(GCC_VERSION) -lt 5 ] 2>/dev/null && echo 1 || echo 0), 1)
+CXXSTD = -std=c++11
+else ifeq ($(shell [ $(GCC_VERSION) -eq 5 ] 2>/dev/null && echo 1 || echo 0), 1)
+CXXSTD = -std=c++14
+else ifeq ($(shell [ $(GCC_VERSION) -eq 6 ] 2>/dev/null || [ $(GCC_VERSION) -eq 7 ] 2>/dev/null && echo 1 || echo 0), 1)
+CXXSTD = -std=c++14
+else ifeq ($(shell [ $(GCC_VERSION) -ge 8 ] 2>/dev/null && echo 1 || echo 0), 1)
+CXXSTD = -std=c++17
+else
+CXXSTD = -std=c++11
+endif
+
+CXXFLAGS = $(CXXSTD) -Wall -Wextra -Wunused $(OPTFLAGS) -pthread -I. -I./include -I./src -I./src/libraries -I./include/arch
 CFLAGS = $(OPTFLAGS) -I. -I./include -I./src -I./src/libraries -I./include/arch
 LDFLAGS = -pthread -lm
-GCC_VERSION := $(shell $(CXX) -dumpversion | cut -d. -f1)
 LDFLAGS += $(shell [ $(GCC_VERSION) -lt 9 ] 2>/dev/null && echo "-lstdc++fs" || true)
 BUILD_DIR = build
 BIN_DIR = $(BUILD_DIR)/bin
 LIB_DIR = $(BUILD_DIR)/lib
 
 SRCS = Mess.cpp \
-       src/system_detection.cpp \
-       src/benchmark_config.cpp \
-       src/cli_parser.cpp \
-       src/kernel_generator.cpp \
-       src/measurement/measurement_storage.cpp \
-       src/measurement/latency_measurer.cpp \
-       src/measurement/outlier_detector.cpp \
+       src/SystemDetection.cpp \
+       src/BenchmarkConfig.cpp \
+       src/CliParser.cpp \
+       src/KernelGenerator.cpp \
+       src/measurement/MeasurementStorage.cpp \
+       src/measurement/LatencyMeasurer.cpp \
+       src/measurement/OutlierDetector.cpp \
        src/measurement/MeasurementUtils.cpp \
        src/measurement/BandwidthMeasurerFactory.cpp \
        src/measurement/bw_measurers/PerfBandwidthMeasurer.cpp \
        src/measurement/bw_measurers/LikwidBandwidthMeasurer.cpp \
+       src/measurement/bw_measurers/VtuneBandwidthMeasurer.cpp \
        src/measurement/bw_measurers/PcmBandwidthMeasurer.cpp \
-       src/process/traffic_gen_process_manager.cpp \
-       src/process/ptrchase_process_manager.cpp \
-       src/utils/progress_tracker.cpp \
-       src/benchmark_executor.cpp \
-       src/results_processor.cpp \
-       src/tlb_utils.cpp \
-       src/utils.cpp \
-       src/ptrchase_perf_helper.cpp
+       src/process/TrafficGenProcessManager.cpp \
+       src/process/PtrchaseProcessManager.cpp \
+       src/utils/ProgressTracker.cpp \
+       src/utils/PmuSysfs.cpp \
+       src/utils/CpuTopology.cpp \
+       src/utils/SubprocessCapture.cpp \
+       src/utils/TerminalCursor.cpp \
+       src/BenchmarkExecutor.cpp \
+       src/ResultsProcessor.cpp \
+       src/TlbUtils.cpp \
+       src/Utils.cpp \
+       src/PtrchasePerfHelper.cpp \
+       src/CurveTracer.cpp
+SRCS += src/measurement/instruction_samplers/IntelPebsSampler.cpp \
+        src/measurement/instruction_samplers/ArmSpeSampler.cpp \
+        src/measurement/InstructionSamplerFactory.cpp
 
-HEADERS = include/benchmark_config.h \
-          include/benchmark_executor.h \
-          include/cli_parser.h \
-          include/codegen.h \
-          include/measurement.h \
-          include/process_manager.h \
-          include/results_processor.h \
-          include/system_detection.h \
-          include/utils.h
+HEADERS = include/BenchmarkConfig.h \
+          include/BenchmarkExecutor.h \
+          include/CliParser.h \
+          include/Codegen.h \
+          include/Measurement.h \
+          include/ProcessManager.h \
+          include/ResultsProcessor.h \
+          include/SystemDetection.h \
+          include/Utils.h \
+          include/CurveTracer.h
 
-LIBS = src/system_info.o
+LIBS = src/SystemInfo.o
 
 src/%.o: src/%.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-OBJS = $(SRCS:.cpp=.o) generate_code.o
+OBJS = $(SRCS:.cpp=.o) GenerateCode.o
 
 TARGETS = $(BIN_DIR)/mess $(BIN_DIR)/generate_code $(BIN_DIR)/mess-profiler
 
 all:
+	@echo "Detected GCC version: $(GCC_VERSION).$(GCC_MINOR)"
+	@echo "Using C++ standard: $(CXXSTD)"
+	@if [ $(GCC_VERSION) -lt 8 ]; then \
+		echo ""; \
+		printf "\033[0;33mWARNING: GCC $(GCC_VERSION).$(GCC_MINOR) does not fully support C++17!\033[0m\n"; \
+		echo "This code requires C++17 features. Please use a newer compiler:"; \
+		echo ""; \
+		if command -v module >/dev/null 2>&1; then \
+			echo "Available compiler modules:"; \
+			module avail gcc 2>/dev/null | grep -E "gcc/(1[0-9]|[2-9][0-9])" | head -10 || echo "  Run 'module avail gcc' to see available compilers"; \
+		else \
+			echo "To check available compilers, try:"; \
+			echo "  which gcc g++"; \
+			echo "  ls /usr/bin/gcc* /usr/bin/g++* 2>/dev/null"; \
+		fi; \
+		echo ""; \
+		printf "\033[0;31mRequired: GCC 8.0 or later for C++17 support\033[0m\n"; \
+		echo ""; \
+		echo "Continuing with $(CXXSTD), but compilation may fail..."; \
+		echo ""; \
+	fi
 	$(MAKE) -j$(JOBS) $(TARGETS)
 	@echo "Build completed successfully!"
 	@echo "Cleaning up all object files..."
-	@rm -f $(SRCS:.cpp=.o) $(LIBS) generate_code.o
+	@rm -f $(SRCS:.cpp=.o) $(LIBS) GenerateCode.o
 
 parallel: 
 	$(MAKE) -j$(JOBS) all
@@ -113,14 +165,15 @@ ARCH_SRCS = src/arch/ArchitectureRegistry.cpp \
             src/arch/x86/counters/AmdZenCounters.cpp \
             src/arch/x86/counters/AmdZen4Counters.cpp \
             src/arch/arm/ArmArchitecture.cpp \
+            src/arch/arm/ArmISAUtils.cpp \
             src/arch/arm/ArmAssembler.cpp \
             src/arch/arm/ArmCounters.cpp \
             src/arch/arm/counters/A64FXCounters.cpp \
             src/arch/arm/counters/Graviton3Counters.cpp \
             src/arch/arm/counters/NvidiaGraceCounters.cpp \
-            src/arch/power/PowerArchitecture.cpp \
-            src/arch/power/PowerAssembler.cpp \
-            src/arch/power/PowerCounters.cpp \
+            src/arch/powerpc/PowerPCArchitecture.cpp \
+            src/arch/powerpc/PowerPCAssembler.cpp \
+            src/arch/powerpc/PowerPCCounters.cpp \
             src/arch/riscv/RiscvArchitecture.cpp \
             src/arch/riscv/RiscvAssembler.cpp \
             src/arch/riscv/RiscvCounters.cpp \
@@ -136,32 +189,36 @@ $(BIN_DIR)/mess: $(SRCS:.cpp=.o) $(ARCH_OBJS) $(LIBS) | $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) -o $@ $(SRCS:.cpp=.o) $(ARCH_OBJS) $(LIBS) $(LDFLAGS)
 
 
-$(BIN_DIR)/generate_code: src/system_detection.o src/kernel_generator.o generate_code.o src/tlb_utils.o src/ptrchase_perf_helper.o src/utils.o $(ARCH_OBJS) $(LIBS) | $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ src/system_detection.o src/kernel_generator.o generate_code.o src/tlb_utils.o src/ptrchase_perf_helper.o src/utils.o $(ARCH_OBJS) $(LIBS) $(LDFLAGS)
+$(BIN_DIR)/generate_code: src/SystemDetection.o src/KernelGenerator.o GenerateCode.o src/TlbUtils.o src/PtrchasePerfHelper.o src/Utils.o src/utils/PmuSysfs.o src/utils/CpuTopology.o src/utils/SubprocessCapture.o $(ARCH_OBJS) $(LIBS) | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ src/SystemDetection.o src/KernelGenerator.o GenerateCode.o src/TlbUtils.o src/PtrchasePerfHelper.o src/Utils.o src/utils/PmuSysfs.o src/utils/CpuTopology.o src/utils/SubprocessCapture.o $(ARCH_OBJS) $(LIBS) $(LDFLAGS)
 
 
-MESS_PROFILER_OBJS = src/system_detection.o \
-                     src/benchmark_config.o \
+MESS_PROFILER_OBJS = src/SystemDetection.o \
+                     src/BenchmarkConfig.o \
                      src/measurement/MeasurementUtils.o \
                      src/measurement/BandwidthMeasurerFactory.o \
                      src/measurement/bw_measurers/PerfBandwidthMeasurer.o \
                      src/measurement/bw_measurers/LikwidBandwidthMeasurer.o \
+                     src/measurement/bw_measurers/VtuneBandwidthMeasurer.o \
                      src/measurement/bw_measurers/PcmBandwidthMeasurer.o \
-                     src/measurement/measurement_storage.o \
-                     src/process/traffic_gen_process_manager.o \
-                     src/profiler/process_binding.o \
-                     src/profiler/profiler_config.o \
-                     src/utils.o
+                     src/measurement/MeasurementStorage.o \
+                     src/process/TrafficGenProcessManager.o \
+                     src/profiler/ProcessBinding.o \
+                     src/profiler/ProfilerConfig.o \
+                     src/utils/PmuSysfs.o \
+                     src/utils/CpuTopology.o \
+                     src/utils/SubprocessCapture.o \
+                     src/Utils.o
 
-$(BIN_DIR)/mess-profiler: mess_profiler.cpp $(MESS_PROFILER_OBJS) $(ARCH_OBJS) $(LIBS) | $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ mess_profiler.cpp $(MESS_PROFILER_OBJS) $(ARCH_OBJS) $(LIBS) $(LDFLAGS)
+$(BIN_DIR)/mess-profiler: MessProfiler.cpp $(MESS_PROFILER_OBJS) $(ARCH_OBJS) $(LIBS) | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ MessProfiler.cpp $(MESS_PROFILER_OBJS) $(ARCH_OBJS) $(LIBS) $(LDFLAGS)
 
 
 Mess.o: Mess.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c Mess.cpp -o $@
 
-generate_code.o: generate_code.cpp $(HEADERS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c generate_code.cpp -o $@
+GenerateCode.o: GenerateCode.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c GenerateCode.cpp -o $@
 
 
 %.o: %.cpp
@@ -192,25 +249,26 @@ install:
 test: $(TARGETS)
 	$(BIN_DIR)/mess --help
 
-debug: CXXFLAGS = -std=c++17 -Wall -Wextra -g -O0 -pthread
+debug: CXXFLAGS = $(CXXSTD) -Wall -Wextra -g -O0 -pthread
 debug: $(TARGETS)
 
 # Dependencies
-Mess.o: include/system_detection.h include/benchmark_config.h include/cli_parser.h include/codegen.h include/benchmark_executor.h include/results_processor.h include/utils.h
+Mess.o: include/SystemDetection.h include/BenchmarkConfig.h include/CliParser.h include/Codegen.h include/BenchmarkExecutor.h include/ResultsProcessor.h include/Utils.h
 
-generate_code.o: include/system_detection.h include/codegen.h include/utils.h
+GenerateCode.o: include/SystemDetection.h include/Codegen.h include/Utils.h
 
-src/system_detection.o: include/system_detection.h
+src/SystemDetection.o: include/SystemDetection.h
 
-src/benchmark_config.o: include/benchmark_config.h
+src/BenchmarkConfig.o: include/BenchmarkConfig.h
 
-src/cli_parser.o: include/cli_parser.h include/benchmark_config.h
+src/CliParser.o: include/CliParser.h include/BenchmarkConfig.h
 
-src/kernel_generator.o: include/codegen.h include/system_detection.h
+src/KernelGenerator.o: include/Codegen.h include/SystemDetection.h
 
-src/benchmark_executor.o: include/benchmark_executor.h include/benchmark_config.h include/codegen.h include/measurement.h include/process_manager.h include/utils.h
+src/CurveTracer.o: include/CurveTracer.h
 
-src/results_processor.o: include/results_processor.h include/benchmark_config.h include/benchmark_executor.h
+src/BenchmarkExecutor.o: include/BenchmarkExecutor.h include/BenchmarkConfig.h include/Codegen.h include/CurveTracer.h include/Measurement.h include/ProcessManager.h include/Utils.h
+
+src/ResultsProcessor.o: include/ResultsProcessor.h include/BenchmarkConfig.h include/BenchmarkExecutor.h
 
 .PHONY: all clean distclean install test debug
-

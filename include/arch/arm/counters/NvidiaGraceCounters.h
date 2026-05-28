@@ -36,12 +36,27 @@
 
 #include "arch/arm/ArmCounters.h"
 
+/**
+ * @file NvidiaGraceCounters.h
+ * @brief NVIDIA Grace counter strategy.
+ */
+
+/** @brief Counter discovery strategy specialized for NVIDIA Grace systems. */
 class NvidiaGraceCounters : public ArmCounters {
 public:
     using ArmCounters::ArmCounters;
 
+    /**
+     * @brief Detects and returns the appropriate IMC counters.
+     * @see ArmCounters::detectCasCounters() for detailed explanation.
+     */
     CasCounterSelection detectCasCounters() override;
+
+    /**
+     * @brief Retrieves the raw event codes for TLB miss counters on Grace.
+     *
+     */
     void getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) override;
 };
 
-#endif // NVIDIA_GRACE_COUNTERS_H
+#endif

@@ -34,7 +34,7 @@
 #include "arch/riscv/counters/SiFiveCounters.h"
 
 CasCounterSelection SiFiveCounters::detectCasCounters() {
-    auto result = discoverFromPerf();
+    auto result = discoverCasCountersForRequestedMeasurer();
     
     if (!result.has_read_write && !result.has_combined_counter) {
         result.failure_reason = "SiFive RISC-V does not expose CAS counters via perf";

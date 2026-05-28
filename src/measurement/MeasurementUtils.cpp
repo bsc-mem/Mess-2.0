@@ -31,10 +31,10 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "measurement.h"
+#include "Measurement.h"
 #include "architecture/ArchitectureRegistry.h"
 #include "architecture/BandwidthCounterStrategy.h"
-#include "utils.h"
+#include "Utils.h"
 
 BandwidthMeasurer::BandwidthMeasurer(const BenchmarkConfig& config, const system_info& sys_info, const CPUCapabilities& caps, MeasurementStorage* storage, TrafficGenProcessManager* traffic_gen_manager, std::function<std::vector<int>()> numa_resolver, ExecutionMode mode)
     : config_(config),
@@ -78,7 +78,7 @@ void BandwidthMeasurer::ensure_scaling_factor_cached() const {
 }
 
 int BandwidthMeasurer::get_traffic_gen_cores() const {
-    int cores = sys_info_.sockets[0].core_count - 1;
+    int cores = get_default_traffic_gen_cores(sys_info_);
     if (config_.traffic_gen_cores > 0 && config_.traffic_gen_cores <= sys_info_.sockets[0].core_count - 1) {
         cores = config_.traffic_gen_cores;
     }

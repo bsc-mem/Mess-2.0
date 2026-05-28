@@ -34,11 +34,26 @@
 #ifndef GRAVITON3_COUNTERS_H
 #define GRAVITON3_COUNTERS_H
 
-#include "architecture/BandwidthCounterStrategy.h"
+#include "arm/ArmCounters.h"
 
-class Graviton3Counters : public BandwidthCounterStrategy {
+/**
+ * @file Graviton3Counters.h
+ * @brief AWS Graviton3 counter strategy.
+ */
+
+/** @brief Counter discovery strategy for AWS Graviton3 systems. */
+class Graviton3Counters : public ArmCounters {
 public:
+    /**
+     * @brief Detects and returns the appropriate IMC counters.
+     * @see ArmCounters::detectCasCounters() for detailed explanation.
+     */
     CasCounterSelection detectCasCounters() override;
+
+    /**
+     * @brief Retrieves the raw event codes for TLB miss counters.
+     * @see ArmCounters::getTlbMissCounters() for detailed explanation.
+     */
     void getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) override;
 };
 

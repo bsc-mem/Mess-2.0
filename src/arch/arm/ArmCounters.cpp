@@ -38,21 +38,15 @@ ArmCounters::ArmCounters(const CPUCapabilities& caps) {
 }
 
 CasCounterSelection ArmCounters::detectCasCounters() {
-    auto result = discoverFromPerf();
-    
-    if (!result.has_read_write && !result.has_combined_counter) {
-        result.combined_events = {"r0017", "r0018", "r0325", "r0326"};
-        result.has_combined_counter = true;
-        result.perf_available = true;
-        result.failure_reason = "";
-    }
-    
-    return result;
+    return discoverCasCountersForRequestedMeasurer();
 }
 
 void ArmCounters::getTlbMissCounters(uint64_t& tlb1_raw, uint64_t& tlb2_raw, bool& use_tlb1, bool& use_tlb2) {
-    tlb1_raw = 0x0005; // tlb1miss (refill)
-    tlb2_raw = 0x002D; // tlb2miss
+    // ARMv8 architectural events; slot ordering matches ArmCounters::computeTlbOverheadNs
+    // (slot1 = page-walk count, slot2 = L1D TLB refill count). STLB hits are then
+    // derived as (slot2 - slot1) by the latency formula.
+    tlb1_raw = 0x002D; // L2D_TLB_REFILL: page-walks triggered (a.k.a. L2 TLB misses)
+    tlb2_raw = 0x0005; // L1D_TLB_REFILL: L1 data TLB refills (L1 misses)
     use_tlb1 = true;
     use_tlb2 = true;
 }

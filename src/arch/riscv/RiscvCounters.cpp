@@ -34,7 +34,7 @@
 #include "arch/riscv/RiscvCounters.h"
 
 CasCounterSelection RiscvCounters::detectCasCounters() {
-    auto result = discoverFromPerf();
+    auto result = discoverCasCountersForRequestedMeasurer();
     
     if (!result.has_read_write && !result.has_combined_counter) {
         result.failure_reason = "Generic RISC-V does not expose CAS counters via perf";
