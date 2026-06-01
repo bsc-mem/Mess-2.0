@@ -60,7 +60,7 @@ Result capture(const std::string& program, const std::vector<std::string>& args,
 
 std::string run_shell(const std::string& command, const Options& opts = {});
 
-std::string run(const std::string& program, const std::vector<std::string>& args, const Options& opts = {}) 
+std::string run(const std::string& program, const std::vector<std::string>& args, const Options& opts = {});
 
 }
 

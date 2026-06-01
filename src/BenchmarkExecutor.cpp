@@ -1378,10 +1378,14 @@ BenchmarkExecutor::BenchmarkStatus BenchmarkExecutor::run_single_benchmark(doubl
     
     std::string traffic_gen_log_file = measurement_storage_->traffic_gen_log_file_path(ratio_pct, pause);
     
-    // In PEBS mode we don't reserve core 0 for ptr_chase, so use all cores by default
     int traffic_gen_cores = config_.instruction_sampling
         ? sys_info_.sockets[0].core_count
         : get_default_traffic_gen_cores(sys_info_);
+    static bool warned_cross_socket_total_cores = false;
+    if (config_.traffic_gen_cores > sys_info_.sockets[0].core_count && !warned_cross_socket_total_cores) {
+        std::cerr << "WARNING: --total-cores is larger than one socket. Mess profiles single-socket curves; spreading traffic across sockets affects the measurements and is not the expected way of running." << std::endl;
+        warned_cross_socket_total_cores = true;
+    }
     if (config_.traffic_gen_cores > 0 && config_.traffic_gen_cores <= sys_info_.sockets[0].core_count) {
         traffic_gen_cores = config_.traffic_gen_cores;
     }
